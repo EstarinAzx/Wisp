@@ -13,15 +13,18 @@ tags: [context, stack]
 - VS Code engine: `^1.85.0`
 
 ## Frameworks / key libraries
-- `openai`: `^4.80.0` — the only runtime dependency. Used as an OpenAI-compatible client pointed at the Zen base URL (`new OpenAI({ apiKey, baseURL })` → `chat.completions.create`, `models.list`).
-- **(planned, dev-only — bundled into the webview asset):**
-  - `preact` + `@preact/preset-vite` — side-panel UI.
-  - `tailwindcss` v4 + `@tailwindcss/vite` — styling (CSS-first, `@import "tailwindcss"`, no config file).
-  - `vite` — bundles `webview/` → single unhashed `dist/webview/main.js` + `main.css`.
+- `openai`: `^4.80.0` — the only **runtime** dependency. OpenAI-compatible client pointed at the Zen base URL (`new OpenAI({ apiKey, baseURL })` → `chat.completions.create`, `models.list`). Ships inside the `.vsix` (vsce packages prod deps; no bundling needed).
+- **Dev-only, bundled into the webview asset at build time:**
+  - `preact` `^10.26` + `@preact/preset-vite` `^2.10` — side-panel UI (JSX → Preact).
+  - `tailwindcss` `^4.1` + `@tailwindcss/vite` `^4.1` — styling (CSS-first, `@import "tailwindcss"`, no config file; theme via `--vscode-*` vars).
+  - `vite` `^6` — bundles `webview/` → single unhashed `dist/webview/main.js` + `main.css`.
 
 ## Build
-- Extension: `tsc -p ./` (config `tsconfig.json`, `include: ["src"]`) → `out/`.
-- Webview (planned): `vite build` → `dist/webview/`. Kept on a **separate tsconfig** under `webview/` so the extension compiler never sees browser JSX.
+- `npm run compile` = `tsc -p ./ && tsc -p webview && vite build`.
+  - `tsc -p ./` (config `tsconfig.json`, `include: ["src"]`) → `out/` — the extension.
+  - `tsc -p webview` — **type-checks only** (`noEmit`); Vite's esbuild transform skips type-checking, so this step is what catches webview type errors.
+  - `vite build` → `dist/webview/`. Webview is on a **separate tsconfig** (`jsx: react-jsx`, `jsxImportSource: preact`, DOM libs) so the extension compiler never sees browser JSX.
+- Package: `npx @vscode/vsce package --allow-missing-repository --skip-license` → `.vsix` (runs `compile` via `vscode:prepublish`). Dev sources excluded by `.vscodeignore`.
 
 ## Services
 - None (no DB/cache). Single external HTTP dependency: the OpenCode Zen provider — see [[api]].

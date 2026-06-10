@@ -7,7 +7,7 @@ tags: [context, api, vscode]
 
 # Surface
 
-The project's surface is a VS Code extension: an inline-completion provider, commands, settings, and (planned) a webview side panel. It consumes one external API.
+The project's surface is a VS Code extension: an inline-completion provider, commands, settings, and a webview side panel. It consumes one external API.
 
 ## Inline completion provider
 - Registered for all files (`{ pattern: '**' }`) via `registerInlineCompletionItemProvider` in `src/extension.ts`.
@@ -21,7 +21,7 @@ The project's surface is a VS Code extension: an inline-completion provider, com
 | `opencodeAutocomplete.toggle` | OpenCode: Toggle Autocomplete | Flip `enabled`; also the status-bar click action. |
 
 ## Settings (`opencodeAutocomplete.*`)
-`enabled` (bool), `baseUrl` (str, default `https://opencode.ai/zen/go/v1`), `model` (str, default `opencode/minimax-m3`), `debounceMs` (300), `maxTokens` (64), `temperature` (0.1), `maxPrefixChars` (2000), `maxSuffixChars` (1000). No `apiKey` setting — key is SecretStorage/env only.
+`enabled` (bool), `baseUrl` (str, default `https://opencode.ai/zen/go/v1`, **`scope: machine`** — not workspace-overridable, blocks key-redirect), `model` (str, default `opencode/minimax-m3`), `debounceMs` (300), `maxTokens` (64), `temperature` (0.1), `maxPrefixChars` (2000), `maxSuffixChars` (1000). No `apiKey` setting — key is SecretStorage/env only. Panel and commands write `model`/`enabled` to the scope that already defines the value (`targetFor()`), not blindly Global.
 
 ## External API consumed — OpenCode Zen (`go`)
 - Base URL: `https://opencode.ai/zen/go/v1`. OpenAI-compatible.
@@ -30,10 +30,16 @@ The project's surface is a VS Code extension: an inline-completion provider, com
 - Auth: `Authorization: Bearer <key>` (handled by the OpenAI SDK). Nothing else required — no `anthropic-version`, no `x-api-key`, no routing headers.
 - Reference implementations studied: the user's `llm-provider` (OpenAI SDK → this exact base URL) and the `codebuff` repo's server handlers (raw fetch, same wire contract).
 
-## Planned — side-panel webview
-- Activity-bar view container + a single `type: webview` view `opencodeAutocomplete.panel`.
-- `WebviewViewProvider` serves an HTML shell (strict CSP + script nonce) loading the Vite bundle.
-- Message protocol — webview→ext: `ready`, `setApiKey`, `clearApiKey`, `selectModel`, `setEnabled`, `refreshModels`; ext→webview: `state{keyIsSet, model, enabled, baseUrl}` (**never the key value**), `models{ids}` / `modelsError`.
+## Side-panel webview
+- Activity-bar view container `opencodeAutocomplete` (icon `media/opencode.svg`) + a single `type: webview` view `opencodeAutocomplete.panel`. Registered with `registerWebviewViewProvider` in `src/extension.ts`; provider is `OpenCodePanelProvider` in `src/sidePanelProvider.ts`.
+- The provider serves an HTML shell (strict CSP + script nonce, `asWebviewUri` for assets) loading the Vite bundle (`dist/webview/main.js` + `main.css`).
+- The panel calls the same shared actions as the commands (`storeApiKey`/`clearApiKey`/`fetchModelIds`/`setModel`/`setEnabled`/`getState`), injected as a `PanelHost` — panel and commands never drift.
+
+### Message protocol
+- **webview → ext:** `ready` · `setApiKey{value}` · `clearApiKey` · `selectModel{value}` · `setEnabled{value}` · `refreshModels`.
+- **ext → webview:** `state{state}` where `state = {keyIsSet, keySource: 'stored'|'env'|'none', model, enabled, baseUrl}` · `models{ids}` · `modelsError{message}`.
+- **Key is write-only across the boundary** — the value is never sent back (only presence + source), and error text is `sanitizeError`'d so a server 401 body can't leak key fragments. See [[gotchas]].
+- State is pushed on `ready`, on `onDidChangeConfiguration` (any `opencodeAutocomplete.*`), and on `secrets.onDidChange` (covers this window's key writes and changes from other windows).
 
 ## Related
 - [[overview]]
