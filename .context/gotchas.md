@@ -43,6 +43,19 @@ Most `zen/go` ids (minimax-m3, mimo, qwen3*, glm5*) emit chain-of-thought **inli
 ### Output-channel logs persist on disk — read them to debug a user's error
 `OutputChannel` content is written to `%APPDATA%\Code\logs\<session>\window<n>\exthost\output_logging_<ts>\<n>-OpenCode Autocomplete.log`. When the user can't surface the Output panel, glob the newest matching file and grep `[error]` instead of walking them through the UI. This is how the `401 … not supported` cause was found.
 
+### Comment-line guard fires only on WHOLE-LINE comments at the true end of line
+`relocateAfterComment` (`src/extension.ts`) stops the model from continuing a comment line. Its gates
+are load-bearing, not incidental: (1) the comment token must be the **first non-whitespace char** of the
+line — a `//`/`#` *anywhere* on the line false-positives on URLs (`https://`), regex (`/\/\//`), shell
+`${var#…}`, YAML `url#frag`, and Python docstring/JSDoc body text; (2) only **known code languages**
+fire (the `LINE_COMMENT` map) — the provider matches every file (`**`), so defaulting `//` onto
+markdown/plaintext/json mangles prose; (3) end-of-line is **strict** (`position.character === line.length`),
+not `trim()`-based — a trailing space with the caret before it means the user is mid-authoring. Don't
+"simplify" any of these to `indexOf` / a `//` default / a trimmed check — each reopens a false-positive
+class the adversarial pass already found. **Block comments (`/* */`, JSDoc `* …`) are intentionally
+unguarded** (only single-line comments trigger the bug; an unterminated `/*` would misdetect). The guard
+fails safe — when unsure it returns the suggestion unchanged and never drops code. See [[decisions]].
+
 ### Packaging ships node_modules — bundling is optional (size only)
 **Empirically verified:** `vsce package` includes production `dependencies`, so `node_modules/openai` is inside the `.vsix` and the extension runs installed without esbuild/webpack. (The earlier claim that it "won't ship without bundling" was wrong.) Bundling remains worth doing later to shrink the package — the unbundled `.vsix` is ~1402 files / 2.33 MB and vsce warns about it — but it is not a correctness blocker.
 

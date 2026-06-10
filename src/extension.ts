@@ -41,7 +41,17 @@ const SYSTEM_PROMPT =
   'You are an autocomplete engine inside a code editor. ' +
   'Continue the code at the <CURSOR> marker. ' +
   'Return ONLY the raw text to insert at the cursor — no explanation, no markdown fences, ' +
-  'and do not repeat the surrounding code. Return an empty string if nothing should be inserted.';
+  'and do not repeat the surrounding code. ' +
+  // Format rule: a chat model left to itself crams a multi-line construct onto one line.
+  'Write idiomatic, properly formatted code — use real newlines and match the file’s ' +
+  'existing indentation; never collapse a multi-line construct onto a single line. ' +
+  // Newline rule: when the cursor sits at the end of an already-complete line (a finished
+  // comment or statement), continuing in place "finishes the sentence" — extending the comment
+  // instead of writing code. Force the completion onto its own line and forbid comment-extension.
+  'If the text immediately before <CURSOR> is already a complete line — a finished comment or ' +
+  'statement with nothing after it — begin your output with a newline so the code starts on its ' +
+  'own line, and never continue or extend a comment. ' +
+  'Return an empty string if nothing should be inserted.';
 
 // ----------------------------- Module state ----------------------------- //
 
@@ -127,6 +137,82 @@ const stripPrefixOverlap = (prefix: string, suggestion: string): string => {
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+// ----------------------------- Comment-line guard ----------------------------- //
+
+// Line-comment opener per language. ONLY listed (code) languages are guarded; an unknown
+// languageId → undefined → the guard never fires. This is the load-bearing false-positive guard:
+// the provider matches every file ('**'), so defaulting '//' onto prose (markdown/plaintext/json)
+// or a stray '//' in a URL would mangle normal text. Block comments (/* */) are out of scope —
+// only a single-line comment triggers the model's "finish the comment" behaviour.
+const LINE_COMMENT: Record<string, string> = {
+  javascript: '//', javascriptreact: '//', typescript: '//', typescriptreact: '//',
+  c: '//', cpp: '//', csharp: '//', java: '//', go: '//', rust: '//', php: '//',
+  swift: '//', kotlin: '//', scala: '//', dart: '//',
+  python: '#', ruby: '#', shellscript: '#', perl: '#', r: '#', yaml: '#', toml: '#',
+  dockerfile: '#', makefile: '#', elixir: '#', powershell: '#', coffeescript: '#',
+  lua: '--', sql: '--', haskell: '--',
+};
+const lineCommentToken = (languageId: string): string | undefined => LINE_COMMENT[languageId];
+
+// Decide whether the model's first line is code to keep vs comment-continuation prose to drop.
+// Errs toward "code" so it never drops text it isn't sure about.
+const looksLikeCode = (s: string): boolean =>
+  /[{}()\[\];=]/.test(s) ||
+  /^\s*(for|if|while|do|switch|case|return|const|let|var|function|async|await|class|def|import|export|public|private|protected|try|catch|throw|new|yield|print|echo|fn|func|type|interface|enum|struct|impl|use|package)\b/.test(s);
+
+// Re-base a block to `indent`: strip the model's own first-line indentation, then apply the comment
+// line's indent to every line — otherwise the dropped-to-new-line code stacks two indents (nested
+// case) or lands at column 0. Leading blank lines are dropped so no stray blank line survives.
+const reindent = (block: string, indent: string, eol: string): string => {
+  const lines = block.replace(/^(?:[ \t]*\r?\n)+/, '').split(/\r?\n/);
+  const base = (lines.find((l) => l.trim() !== '')?.match(/^[ \t]*/) ?? [''])[0];
+  return lines
+    .map((l) => (l.trim() === '' ? '' : indent + (l.startsWith(base) ? l.slice(base.length) : l.replace(/^[ \t]*/, ''))))
+    .join(eol);
+};
+
+// When the caret sits at the end of a finished single-line comment, a chat model "finishes the
+// comment" — appending prose and/or writing code ON the comment line. Force any real code onto its
+// own fresh, correctly-indented line and drop a leading run of comment prose. Fails SAFE: returns
+// the suggestion untouched in every ambiguous case, and never deletes code.
+const relocateAfterComment = (
+  document: vscode.TextDocument,
+  position: vscode.Position,
+  suggestion: string,
+  eol: string,
+): string => {
+  if (!suggestion) return suggestion;
+
+  const line = document.lineAt(position.line).text;
+  // Strict end-of-line: any char after the caret (even a space) = user still typing on the line.
+  // This is what excludes the mid-comment-authoring case (`// handle the| `).
+  if (position.character !== line.length) return suggestion;
+
+  const token = lineCommentToken(document.languageId);
+  if (!token) return suggestion;
+
+  // Whole-line comment with real content: token is the first non-whitespace char (not a block-body
+  // `*` line, not a URL/regex/`${#}` mid-line token) and something follows it (not a bare `//`).
+  const trimmed = line.trimStart();
+  if (!trimmed.startsWith(token) || trimmed.slice(token.length).trim() === '') return suggestion;
+
+  // Model already broke to its own line → just collapse any extra blank lines it added.
+  if (/^\r?\n/.test(suggestion)) return suggestion.replace(/^(?:[ \t]*\r?\n)+/, eol);
+
+  const indent = line.slice(0, line.length - trimmed.length);
+  const parts = suggestion.split(/\r?\n/);
+  const head = parts[0];
+
+  // No code anywhere → a genuine comment continuation; leave it alone rather than orphan prose.
+  if (!looksLikeCode(head) && !parts.slice(1).some(looksLikeCode)) return suggestion;
+
+  // Drop the in-place prose only when head is prose AND real code follows; else keep everything.
+  const body = (!looksLikeCode(head) ? parts.slice(1) : parts).join('\n');
+  if (!body.trim()) return suggestion;
+
+  return eol + reindent(body, indent, eol);
+};
+
 // ----------------------------- Status bar ----------------------------- //
 
 // Reflect current state in the status bar: disabled / thinking / error / ready. Latency is
@@ -204,7 +290,10 @@ const provider: vscode.InlineCompletionItemProvider = {
         { signal: controller.signal },
       );
 
-      const text = stripPrefixOverlap(prefix, stripFences(stripThink(res.choices[0]?.message?.content ?? '')));
+      const cleaned = stripPrefixOverlap(prefix, stripFences(stripThink(res.choices[0]?.message?.content ?? '')));
+      // Never let a completion extend a comment line: relocate real code onto its own line.
+      const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+      const text = relocateAfterComment(document, position, cleaned, eol);
       lastError = false;
       output.appendLine(`${model} ${Date.now() - started}ms ${text.length}c`); // latency log for model tuning
 
