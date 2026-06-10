@@ -1,4 +1,10 @@
+.vscode/**
 src/**
+webview/**
+vite.config.ts
 .gitignore
 tsconfig.json
 **/*.map
+.context/**
+CLAUDE.md
+PRD.md

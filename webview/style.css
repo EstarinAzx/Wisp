@@ -1,0 +1,64 @@
+/* style.css — Tailwind v4 entry + theme-native base mapped to --vscode-* variables */
+
+@import "tailwindcss";
+
+@layer base {
+  body {
+    background: transparent; /* let the sidebar background show through */
+    color: var(--vscode-foreground);
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+  }
+}
+
+@layer components {
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--vscode-descriptionForeground);
+  }
+
+  .input {
+    padding: 4px 6px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 2px;
+  }
+  .input::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+  }
+  .input:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+
+  .btn {
+    padding: 4px 10px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .btn-secondary {
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--vscode-button-secondaryHoverBackground);
+  }
+
+  input[type="checkbox"] {
+    accent-color: var(--vscode-button-background);
+  }
+}
