@@ -13,7 +13,7 @@ no single place to see whether my key is set, which model is active, and whether
 
 ## Solution
 
-Two parts, as experienced by the user:
+Three parts, as experienced by the user:
 
 1. **Inline completions** — as I type, ghost text suggestions appear after a short pause and I accept
    them with Tab. Suggestions come from a chat model on the OpenCode Zen endpoint, prompted to behave
@@ -27,6 +27,16 @@ Two parts, as experienced by the user:
    while a completion request is in flight, "Idle" otherwise (muted when autocomplete is disabled) —
    so the panel itself signals what the extension is doing. The panel and the existing commands stay
    in sync, and the UI matches my editor theme.
+
+3. **Inquire — on-demand, whole-file code generation** — when I select lines in the editor (a comment
+   describing what I want, or code to act on) and choose **Inquire** from the right-click menu, the
+   extension sends the **whole file** as context with my selection as the instruction and returns
+   insertable code as ghost text on a fresh line **after** my selection, accepted with Tab exactly
+   like a completion. Unlike a completion it is **manually triggered**, reads the **entire file**
+   (not just a prefix/suffix window), and works **even when autocomplete is toggled off**. A
+   cancellable progress notification shows while it runs (a reasoning model over a whole file can be
+   slow) and the status bar / panel show the same "Thinking…" Activity. Inquire returns **code only —
+   never prose**; it is not a chat or an "explain this" feature.
 
 ## User Stories
 
@@ -90,6 +100,21 @@ Two parts, as experienced by the user:
     working, so that nothing I already use breaks when the panel is added.
 32. As a developer, I want the side panel to show whether the extension is thinking or idle, so that
     I can tell at a glance what it is doing without looking at the status bar.
+33. As a developer, I want to select lines and trigger a suggestion on demand from the right-click
+    menu, so that I get a suggestion exactly when I want one, not only while typing.
+34. As a developer, I want that on-demand suggestion to use my whole file as context, so that the
+    generated code fits the rest of my script (real variable and function names), not just the lines
+    around the caret.
+35. As a developer, I want to write intent as a comment, select it, and get the implementing code, so
+    that I can describe what I want in plain language and have it written below.
+36. As a developer, I want the generated code inserted on its own line after my selection (never
+    replacing it), so that I never lose the lines I selected.
+37. As a developer, I want Inquire to work even when autocomplete is disabled, so that I can keep
+    automatic suggestions off but still ask for one deliberately.
+38. As a developer, I want a cancellable progress indicator while Inquire runs, so that I know it is
+    working and can abort if I picked the wrong lines or the wrong moment.
+39. As a developer, I want a clear message if I trigger Inquire with no selection or no API key, so
+    that I understand why nothing happened.
 
 ## Implementation Decisions
 
@@ -103,6 +128,33 @@ Two parts, as experienced by the user:
   target while still allowing short multi-line blocks.
 - **Provider integration** mirrors the reference `llm-provider`: the OpenAI SDK pointed at the Zen
   base URL, Bearer auth handled by the SDK.
+
+**Inquire — on-demand whole-file code generation (added 2026-06-14):**
+
+- **Insertable code only, selection-as-prompt.** Inquire returns code to insert, never prose; the
+  selected lines *are* the instruction (a comment → its implementation; code → context to act on).
+  A free-text question box and prose/chat answers were rejected — they need a non-ghost surface and a
+  different interaction model (see Out of Scope).
+- **Append after the selection, never replace.** The caret collapses to the end of the selection and
+  the result renders as ghost text on a fresh line below. Replacing the selection was rejected: a
+  loose reasoning model returning junk would destroy the user's code, against the fail-safe ethos of
+  the cleanup pipeline (which "never deletes code").
+- **Whole file as context, with a size guard.** The entire file is sent as context; above a
+  ~32k-char threshold it falls back to a large window around the selection (reusing the completion
+  context slicer with bigger limits) plus a "file too big — used nearby context" notice, so a huge
+  file degrades gracefully instead of overflowing the model's context window.
+- **Independent of the `enabled` toggle.** Inquire is a deliberate action, so it runs even when
+  automatic completion is off: its result path runs before the provider's enabled / selection /
+  debounce gates, and it bypasses the single-entry completion cache.
+- **Manual ghost-text trigger.** The command stashes a pending Inquiry result keyed to the document +
+  collapsed caret and fires `editor.action.inlineSuggest.trigger`; the inline provider returns the
+  stash for the matching position, then clears it. **Risk:** inline suggestions are normally
+  keystroke-driven — this manual-trigger path is validated with a throwaway spike before the rest is
+  built.
+- **Feedback.** A cancellable `vscode.window.withProgress` notification (Cancel wired to the existing
+  `AbortController`) plus the existing status-bar / panel Activity ("Thinking…"). Reuses
+  `stripThink` / `stripFences` / `relocateAfterComment`; reuses the existing `model` setting (no
+  separate Inquire model in v1).
 
 Modules to build or modify (interfaces, not file paths):
 
@@ -178,6 +230,10 @@ Architectural decisions:
 - Bundling/packaging the extension for the Marketplace (a bundler step for `vsce package`) — noted as
   a later concern, not part of this PRD.
 - Per-language enable/disable rules and string/comment-aware trigger gating.
+- **Inquire deferred modes** (possible later, not in v1): a free-text question box (a typed prompt in
+  addition to the selection); prose / explanation answers (would need a non-ghost surface — panel or
+  hover — and a different interaction model); a replace/transform mode that swaps the selection for
+  the generated code; a separate, stronger model for Inquire.
 
 ## Further Notes
 

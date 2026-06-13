@@ -37,6 +37,30 @@ Does not show `error` (that stays the status bar's job).
 The panel indicator's dimmed appearance when autocomplete is **disabled** — a
 visual third dressing, not a third **Activity** value. Activity stays Idle.
 
+### How code is suggested — Completion and Inquire
+
+**Suggestion**:
+Ghost text the extension proposes for insertion at the caret, accepted with Tab.
+It is always **insertable code**, never prose. Two triggers produce a Suggestion —
+**Completion** and **Inquire** — both rendering on the same ghost-text surface.
+_(Resolves the earlier overload: "suggestion" names the surface, not one feature.)_
+
+**Completion**:
+The **automatic** Suggestion. Fires while typing (debounced), sends only the
+**prefix/suffix window** around the caret as context, is gated by the **enabled**
+toggle, and is suppressed while a selection is active.
+
+**Inquire**:
+The **manual** Suggestion. The user selects lines and invokes **Inquire** (editor
+right-click); the extension treats the **selection as the prompt** and the **whole
+file** as context, and returns insertable code as a Suggestion. Works **even when
+Completion is disabled** — Inquire ignores the **enabled** toggle.
+_Avoid_: calling Inquire a "chat", "ask", or "explanation" — it returns code, never prose.
+
+**Selection-as-prompt**:
+For **Inquire**, the highlighted lines *are* the instruction — a comment describing
+intent (→ generate the code), or code to act on — not merely a caret location.
+
 ## Relationships
 
 - **Activity** has exactly two values: **Thinking** | **Idle**.

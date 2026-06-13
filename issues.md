@@ -1,7 +1,7 @@
-# Issues — Panel activity indicator
+# Issues — opencode-autocomplete
 
-Local issue tracker (repo is non-git). One tracer-bullet vertical slice.
-Vocabulary per `CONTEXT.md`: **Activity = Thinking | Idle**.
+Local issue tracker. Tracer-bullet vertical slices.
+Vocabulary per `CONTEXT.md`.
 
 ---
 
@@ -46,3 +46,75 @@ extension already tracks in-flight completion requests for the status bar
 - [ ] No new term leaks: panel reads "Thinking…" / "Idle"; status bar wording unchanged.
 - [ ] `tsc -p ./` and `tsc -p webview` clean; `vite build` clean.
 - [ ] Manual verify in the Extension Development Host (F5): typing fires a request → dot pulses "Thinking…", settles to "Idle"; toggle off → row greys.
+
+---
+
+## Issue 2 — Inquire: on-demand whole-file code generation
+
+**Type:** Interactive — starts with a throwaway spike to de-risk the manual ghost-text trigger (step 0
+below); build the rest only once the spike proves the surface works.
+**Blocked by:** None — can start immediately.
+**User stories:** #33–#39 (per `PRD.md`).
+**Vocabulary** per `CONTEXT.md`: **Inquire**, **Suggestion**, **Selection-as-prompt**, **Completion**.
+
+### What to build
+
+A manual **Inquire** action: select lines → right-click → **OpenCode: Inquire** → the extension sends
+the **whole file** as context with the **selection as the prompt** and returns insertable code as
+ghost text on a fresh line **after** the selection (append-only, never replace), accepted with Tab.
+Works even when Completion is disabled. Inquire returns **code only, never prose**.
+
+- **New command** `opencodeAutocomplete.inquire` (title "OpenCode: Inquire"), contributed to the
+  **editor right-click menu** (`editor/context`, `when: editorHasSelection`) **and** the command palette.
+- **Manual ghost-text trigger.** The command captures the selection text + whole-file context, fetches
+  a non-streaming completion, stashes the result as a module-level `pendingInquiry` keyed to the
+  document + collapsed caret (end of selection), then fires `editor.action.inlineSuggest.trigger`. The
+  inline provider, at the **top** of `provideInlineCompletionItems` (before the enabled / selection /
+  debounce / cache gates), returns the stashed result when it matches the current position, then clears it.
+- **Whole-file context + size guard.** Send the entire file with the selection marked as the
+  instruction. Above ~32k chars, fall back to a large window around the selection (reuse `buildContext`
+  with larger limits) and toast "file too big — used nearby context."
+- **New `INQUIRE_SYSTEM_PROMPT`.** "Here is the full file; the user selected these lines as an
+  instruction; return ONLY code to insert after the selection; implement what the selection asks; match
+  the file's indentation; no prose, no markdown fences." Reuse `stripThink` / `stripFences`; reuse
+  `relocateAfterComment` (the caret sits at the selection's last line — when that line is a comment it
+  forces the code onto its own line).
+- **Independent of `enabled`.** The pending-Inquiry return path runs before the provider's enabled and
+  selection gates; Inquire bypasses the `lastResult` completion cache (neither reads nor writes it).
+- **Feedback.** A cancellable `vscode.window.withProgress` notification ("OpenCode: inquiring…", Cancel
+  wired to the `AbortController`) + the existing status-bar / panel Activity via
+  `enterInFlight` / `exitInFlight`.
+- **Edge cases.** No selection → only reachable via the palette → toast "Select the lines to inquire
+  about." No key → toast "Set your OpenCode API key first" (as `listModels` does). Neither fires a request.
+
+### Files
+
+- `package.json` — `contributes.commands` (`opencodeAutocomplete.inquire`) + `contributes.menus`
+  (`editor/context`, `when: editorHasSelection`); version bump 0.0.3 → 0.0.4.
+- `src/extension.ts` — `inquire` command handler; module-level `pendingInquiry`; provider early-return
+  for a matching pending result (before all gates); `INQUIRE_SYSTEM_PROMPT`; whole-file + size-guard
+  context builder; `withProgress` wrapper; register the command in `activate`.
+- _No webview change_ — Inquire reuses the ghost-text surface; the status-bar / panel Activity is
+  already wired.
+
+### Acceptance criteria
+
+- [ ] **Step 0 — spike:** confirm `editor.action.inlineSuggest.trigger` + a stashed pending result
+  renders ghost text at a collapsed caret right after a selection. If it does **not**, stop and revisit
+  the answer-surface decision before building the rest.
+- [ ] `opencodeAutocomplete.inquire` registered; shows in the editor right-click menu **only** with a
+  selection, and in the command palette.
+- [ ] Select a comment + Inquire → implementing code appears as ghost text on a new line **after** the
+  comment; Tab inserts it; the selected comment is preserved (append, never replace).
+- [ ] The request includes the **whole file** as context (verify via the output log); over the size
+  threshold it falls back to a windowed context with the "file too big" toast.
+- [ ] Inquire works with `enabled: false` (autocomplete off) — still returns a suggestion.
+- [ ] A cancellable progress notification shows while running; Cancel aborts the HTTP request; status
+  bar + panel show "Thinking…" during, "Idle" after.
+- [ ] No selection (palette) → "Select the lines to inquire about." No key → "Set your OpenCode API key
+  first." Neither path fires a request.
+- [ ] Inquire neither reads nor writes the `lastResult` completion cache.
+- [ ] `relocateAfterComment` / `stripThink` / `stripFences` reused — no doubled `<think>` or fences in
+  inserted code.
+- [ ] `tsc -p ./` clean (`tsc -p webview` unaffected); `vite build` clean; repackaged `.vsix`.
+- [ ] Manual verify in the Extension Development Host (F5).

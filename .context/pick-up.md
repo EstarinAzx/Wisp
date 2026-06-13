@@ -1,7 +1,7 @@
 ---
 type: pick-up
 project: opencode-autocomplete
-updated: 2026-06-10
+updated: 2026-06-14
 tags: [context, pick-up]
 ---
 
@@ -9,31 +9,32 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate the project.
 
-**Last task finished (2026-06-10):** shipped **Issue 1 — side-panel activity indicator** (`issues.md`).
-The panel now shows the live **Activity** (Thinking / Idle) as a top status row with a pulse dot, muted
-(`opacity-50`) when disabled. New `activity{thinking}` ext→webview message: `enter/exitInFlight` push it
-via `panel.postActivity`, and the `ready` handler pushes current activity via new `PanelHost.getActivity`;
-the webview holds `thinking` separate from `state`. **Status bar untouched.** Files: `src/extension.ts`,
-`src/sidePanelProvider.ts`, `webview/app.tsx`, `package.json` (0.0.2→0.0.3). Added glossary `CONTEXT.md`
-(**Activity = Thinking | Idle**); synced `PRD.md`/`api`/`decisions`/`overview`. Verified `tsc -p ./` +
-`tsc -p webview` + `vite build` clean, new CSS utilities present, repackaged
-`opencode-autocomplete-0.0.3.vsix`; user eyeballed live and approved.
+**Last task finished (2026-06-14):** spec'd a new feature, **Inquire**, via `/grill-with-docs` —
+**docs only, no code**. Inquire = a **manual, whole-file-context, insertable-code** suggestion: select
+lines → right-click **OpenCode: Inquire** → selection is the prompt, whole file is context, result is
+ghost text **after** the selection (append, never replace). Works **even when Completion is disabled**;
+returns **code only, never prose**. Wrote: `CONTEXT.md` (terms **Suggestion/Completion/Inquire/
+Selection-as-prompt**), `PRD.md` (Solution part 3, stories #33–#39, Inquire decisions block, Out-of-
+Scope deferred modes), `issues.md` (**Issue 2 — Inquire**, spike-first). Decision logged in
+`decisions.md` (2026-06-14).
 
-**Next task (pick one — nothing mid-flight):**
-1. **Faster default model** — `minimax-m3` is a reasoning model, 4–7.6s/suggestion. Try
-   `deepseek-v4-flash` / `kimi-k2.6` in the panel; if a non-reasoning id is reliably sub-second, change
-   `DEFAULT_MODEL` (`src/extension.ts`) + the `model` default (`package.json`).
-2. **TDD M1 + M2** — pure fns in `src/extension.ts` (`stripFences`/`stripPrefixOverlap`/`stripThink`/
-   `looksLikeCode`/`reindent`/`relocateAfterComment`/`buildContext`) still untested + unexported. Spec in
-   `PRD.md`. Test-export or extract first. Use `/tdd`.
-3. **(optional) ship** — repo is **non-git**; `git init` first if you want `/preset ship` / a PR.
+**Next task:** **build Issue 2 — Inquire** (`issues.md`). **Spike first** (step 0): confirm
+`editor.action.inlineSuggest.trigger` + a stashed pending result renders ghost text at a **collapsed
+caret after a selection** — if not, stop and revisit the surface before building. Then implement per
+Issue 2 in `src/extension.ts` + `package.json` (0.0.3 → 0.0.4); no webview change. Consider
+`/preset scope` before coding.
 
-**Landmines (see [[gotchas]]):**
-- Repo is **non-git** → no commit/branch/PR until `git init`. `wrap-up`'s commit step is a no-op here.
-- After editing, the running build is stale until **rebuild + reload window** (recompile + repackage +
-  `--force` install, or F5).
-- Still live from prior work: model ids are **bare** on `zen/go/v1` (the `opencode/` prefix 401s); served
-  models are **reasoning models** (keep `stripThink`, `maxTokens` default `0`); don't weaken the
-  `relocateAfterComment` gates; key never crosses to the webview; two tsconfigs — keep `tsc -p webview`.
+**Landmines (see [[gotchas]] + [[active-work]]):**
+- **The spike is the one unproven assumption** — inline suggestions are keystroke-driven by default;
+  the whole feature rests on the manual trigger working. Validate it before writing the rest.
+- **Append, never replace; code only, never prose** — both alternatives were explicitly rejected
+  (data-loss / wrong-surface). Don't quietly reintroduce them.
+- Inquire must run **before** the provider's enabled/selection/debounce/cache gates and must **not**
+  touch the `lastResult` cache.
+- Reuse `stripThink`/`stripFences`/`relocateAfterComment` + the `model` setting — don't reinvent.
+- Still live: bare model ids on `zen/go/v1` (the `opencode/` prefix 401s); served models are reasoning
+  models (keep `stripThink`, `maxTokens` default `0`); key never crosses to the webview; two tsconfigs.
+- After editing, rebuild + reload window (recompile + repackage + `--force` install, or F5) — the
+  running build is otherwise stale.
 
-Full rolling state in [[active-work]]; settled choices in [[decisions]].
+Full rolling state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.
