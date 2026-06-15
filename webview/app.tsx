@@ -6,12 +6,12 @@
  *   - acquireVsCodeApi (webview/vscode.d.ts): postMessage channel to the extension.
  *
  * Data shapes:
- *   - State: { keyIsSet, model, enabled, baseUrl } — pushed by the extension; the key value
- *     itself never arrives here, only the keyIsSet boolean.
+ *   - State: { keyIsSet, keySource, keyEnv, model, enabled, baseUrl, providerId, providers,
+ *     isCustom } — pushed by the extension; the key value itself never arrives here, only keyIsSet.
  *   - InMsg: state{state} | models{ids} | modelsError{message} | activity{thinking} — everything
  *     the extension sends. activity carries the live Thinking/Idle state, separate from state.
- *   - Outbound: ready | setApiKey{value} | clearApiKey | selectModel{value} | setEnabled{value}
- *     | refreshModels.
+ *   - Outbound: ready | setApiKey{value} | clearApiKey | selectModel{value} | selectProvider{value}
+ *     | setBaseUrl{value} | setEnabled{value} | refreshModels.
  */
 
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -21,9 +21,13 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 type State = {
   keyIsSet: boolean;
   keySource: 'stored' | 'env' | 'none';
+  keyEnv: string;
   model: string;
   enabled: boolean;
   baseUrl: string;
+  providerId?: string;
+  providers: { id: string; label: string }[];
+  isCustom: boolean;
 };
 
 type InMsg =
@@ -44,8 +48,9 @@ export const App = () => {
   const [modelsError, setModelsError] = useState('');
   const [keyDraft, setKeyDraft] = useState('');
   const [modelDraft, setModelDraft] = useState('');
-  // Where the current models list came from — used to drop it when endpoint/credentials change.
-  const modelsOrigin = useRef<{ baseUrl: string; keyIsSet: boolean } | undefined>(undefined);
+  // Where the current models list came from — used to drop it when Provider/endpoint/credentials
+  // change. Keyed on providerId too so a switch refetches even if two rows shared a base URL.
+  const modelsOrigin = useRef<{ providerId?: string; baseUrl: string; keyIsSet: boolean } | undefined>(undefined);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent<InMsg>) => {
@@ -54,15 +59,15 @@ export const App = () => {
         // The fetched list belonged to the previous endpoint/credentials — don't keep
         // offering ids the new endpoint may not serve.
         const prev = modelsOrigin.current;
-        if (prev && (prev.baseUrl !== msg.state.baseUrl || (prev.keyIsSet && !msg.state.keyIsSet))) {
+        if (prev && (prev.providerId !== msg.state.providerId || prev.baseUrl !== msg.state.baseUrl || (prev.keyIsSet && !msg.state.keyIsSet))) {
           setModels([]);
         }
-        // First state, a newly-set key, or a changed endpoint → pull the live list once so the
-        // dropdown fills on its own. Without this the user only ever sees the configured model
-        // until they discover the manual ↻. Gated on origin change so it can't loop on an
-        // empty result or re-fire on unrelated config pushes (model/enabled changes).
-        const newOrigin = !prev || prev.baseUrl !== msg.state.baseUrl || prev.keyIsSet !== msg.state.keyIsSet;
-        modelsOrigin.current = { baseUrl: msg.state.baseUrl, keyIsSet: msg.state.keyIsSet };
+        // First state, a newly-set key, a switched Provider, or a changed endpoint → pull the live
+        // list once so the dropdown fills on its own. Without this the user only ever sees the
+        // configured model until they discover the manual ↻. Gated on origin change so it can't loop
+        // on an empty result or re-fire on unrelated config pushes (model/enabled changes).
+        const newOrigin = !prev || prev.providerId !== msg.state.providerId || prev.baseUrl !== msg.state.baseUrl || prev.keyIsSet !== msg.state.keyIsSet;
+        modelsOrigin.current = { providerId: msg.state.providerId, baseUrl: msg.state.baseUrl, keyIsSet: msg.state.keyIsSet };
         setState(msg.state);
         if (newOrigin && msg.state.keyIsSet) {
           setModelsError('');
@@ -103,6 +108,12 @@ export const App = () => {
     setModelDraft('');
   };
 
+  // Custom-only: commit the typed base URL. Skip empties so a stray blur can't wipe a working URL.
+  const commitBaseUrl = (raw: string) => {
+    const value = raw.trim();
+    if (value) vscode.postMessage({ type: 'setBaseUrl', value });
+  };
+
   // Keep the select truthful even before the live list is fetched (or when the configured
   // model isn't served): show the current model as an extra option.
   const options = models.includes(state.model) ? models : [state.model, ...models];
@@ -123,12 +134,54 @@ export const App = () => {
         <span class="text-[var(--vscode-descriptionForeground)]">{thinking ? 'Thinking…' : 'Idle'}</span>
       </section>
 
+      {/* ------------------------------ Provider ------------------------------ */}
+      {/* The Active Provider drives the base URL the key is sent to. Switching re-keys the model
+          list and the key hint below — no auto-prompt for a key-less Provider, just the hint. */}
+      <section class="flex flex-col gap-1.5">
+        <h2 class="section-title">Provider</h2>
+        <select
+          class="input"
+          value={state.providerId}
+          onChange={(e) => {
+            const value = e.currentTarget.value;
+            setState({ ...state, providerId: value }); // optimistic; the state push confirms
+            vscode.postMessage({ type: 'selectProvider', value });
+          }}
+        >
+          {state.providers.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+        {/* Cline ToS (§2.2): user-key only + this note. The responsibility sits with the user. */}
+        {state.providerId === 'cline' && (
+          <p class="text-xs text-[var(--vscode-descriptionForeground)]">
+            You are responsible for your own Cline ToS compliance.
+          </p>
+        )}
+      </section>
+
+      {/* ------------------------------ Base URL (Custom only) ------------------------------ */}
+      {/* Only Custom exposes an editable base URL (machine-scoped wisp.baseUrl); built-ins hide it
+          and the footer below shows the derived URL. Commit on blur or Enter, not per keystroke. */}
+      {state.isCustom && (
+        <section class="flex flex-col gap-1.5">
+          <h2 class="section-title">Base URL</h2>
+          <input
+            class="input"
+            type="text"
+            placeholder="https://your-endpoint/v1"
+            value={state.baseUrl}
+            onInput={(e) => setState({ ...state, baseUrl: e.currentTarget.value })}
+            onBlur={(e) => commitBaseUrl(e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitBaseUrl(e.currentTarget.value); }}
+          />
+        </section>
+      )}
+
       {/* ------------------------------ API key ------------------------------ */}
       <section class="flex flex-col gap-1.5">
         <h2 class="section-title">API Key</h2>
         <p class="text-[var(--vscode-descriptionForeground)]">
           {state.keySource === 'stored' ? '● Key set'
-            : state.keySource === 'env' ? '● Using OPENCODE_API_KEY from environment'
+            : state.keySource === 'env' ? `● Using ${state.keyEnv} from environment`
             : '○ No key set'}
         </p>
         <input

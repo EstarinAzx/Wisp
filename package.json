@@ -2,7 +2,7 @@
   "name": "wisp",
   "displayName": "Wisp",
   "description": "Wisp: AI inline completions and on-demand code generation, backed by the OpenCode Zen provider.",
-  "version": "0.0.5",
+  "version": "0.0.8",
   "publisher": "local",
   "private": true,
   "engines": {
@@ -70,11 +70,29 @@
           "default": true,
           "description": "Master on/off switch for inline suggestions."
         },
+        "wisp.provider": {
+          "type": "string",
+          "scope": "machine",
+          "default": "opencode-zen",
+          "enum": [
+            "opencode-zen",
+            "openai",
+            "groq",
+            "mistral",
+            "openrouter",
+            "ollama",
+            "ollama-cloud",
+            "kilocode",
+            "cline",
+            "custom"
+          ],
+          "description": "Active Provider — which Provider's base URL your API key is sent to. 'custom' uses wisp.baseUrl. Machine-scoped because selecting a Provider selects where your bearer key is sent, so a workspace must not be able to redirect it. Unknown values fall back to opencode-zen."
+        },
         "wisp.baseUrl": {
           "type": "string",
           "scope": "machine",
           "default": "https://opencode.ai/zen/go/v1",
-          "description": "OpenAI-compatible base URL for the OpenCode Zen provider. Machine-scoped so a workspace cannot redirect requests (and the API key) to another endpoint."
+          "description": "OpenAI-compatible base URL used ONLY when the Active Provider is 'custom' (built-in Providers use their own hardcoded URLs and ignore this). Machine-scoped so a workspace cannot redirect requests (and the API key) to another endpoint."
         },
         "wisp.model": {
           "type": "string",

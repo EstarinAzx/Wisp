@@ -4,7 +4,7 @@
  * Depends on:
  *   - vscode: editor host API — registers the inline provider, reads settings, stores the key
  *     in the OS keychain (SecretStorage), drives the status-bar indicator and the cancellation token.
- *   - openai: OpenAI-compatible client, pointed at the OpenCode Zen base URL — the exact pattern
+ *   - openai: OpenAI-compatible client, pointed at the Active Provider's base URL — the exact pattern
  *     used by the reference llm-provider (`new OpenAI({ apiKey, baseURL })` → chat.completions.create).
  *   - ./sidePanelProvider: the side-panel webview. It receives the shared action helpers below
  *     (storeApiKey/clearApiKey/fetchModelIds/setModel/setEnabled/getState) so panel and commands
@@ -29,11 +29,9 @@ import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvid
 // ----------------------------- Constants ----------------------------- //
 
 const CONFIG_NS = 'wisp';
-const SECRET_KEY = 'wisp.apiKey'; // keychain entry name, not a literal key
-const DEFAULT_BASE_URL = 'https://opencode.ai/zen/go/v1';
-// Bare id, not "opencode/minimax-m3": the /go chat endpoint rejects the provider-prefixed
-// form ("401 Model … is not supported") and wants the id exactly as /models serves it.
-const DEFAULT_MODEL = 'minimax-m3';
+// Legacy (pre-catalog) keychain slot. Per-Provider keys now live in `${SECRET_KEY}.<id>` slots;
+// this bare name is read once by migrateLegacyKey() then deleted. Not a literal key.
+const SECRET_KEY = 'wisp.apiKey';
 
 // Zen/go has no fill-in-middle route, so we hand a chat model the code on both sides of the caret
 // and ask for only the insertion — this instruction is what makes a chat model behave like a completer.
@@ -67,10 +65,56 @@ const INQUIRE_SYSTEM_PROMPT =
 // so Inquire falls back to a large window around the selection instead.
 const INQUIRE_CONTEXT_LIMIT = 32000;
 
+// ----------------------------- Provider catalog ----------------------------- //
+
+// A Provider is one OpenAI-chat-compatible backend, reached by swapping {baseUrl, key, model} on the
+// same `openai` SDK. Base URLs are HARDCODED here, never read from settings: choosing a Provider
+// chooses where the bearer key is sent, so a workspace-overridable URL would be a key-redirect vector.
+// The catalog is the nine built-ins below (OpenCode Zen default) plus a user-defined Custom row whose
+// base URL alone comes from settings (machine-scoped wisp.baseUrl). No model-id transform — each
+// defaultModel is in the Provider's native form (re-adding Zen's `opencode/` prefix 401s the /go
+// endpoint, which wants the bare id /models serves). GitHub Copilot and Cursor are deliberately
+// absent (ban risk / shape-incompatible — see the 2026-06-15 multi-provider ADR + gotchas).
+type Provider = {
+  id: string;            // stable id; also the key-slot + globalState model-map suffix
+  label: string;         // canonical vendor name (panel/UI, never the status bar)
+  baseUrl: string;       // hardcoded OpenAI-compatible base URL
+  defaultModel: string;  // native-format model id used when the Provider has none remembered
+  apiKeyEnv: string;     // env-var fallback for the key ('' = none, e.g. local Ollama)
+};
+
+// defaultModel for the first five is doc-verified; the four marked ⚠ are BEST-EFFORT presets — no
+// key was available to verify them against each GET /models, so the panel's model picker / type-field
+// is the correction path. ⚠ Ollama Cloud is `/v1`, NOT `/api/v1` (the `/api` prefix is Ollama's
+// native protocol and breaks the OpenAI SDK — see gotchas.md).
+const PROVIDERS: Provider[] = [
+  { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/go/v1', defaultModel: 'minimax-m3', apiKeyEnv: 'OPENCODE_API_KEY' },
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY' },
+  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', apiKeyEnv: 'GROQ_API_KEY' },
+  { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', defaultModel: 'codestral-latest', apiKeyEnv: 'MISTRAL_API_KEY' },
+  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o-mini', apiKeyEnv: 'OPENROUTER_API_KEY' },
+  { id: 'ollama', label: 'Ollama (local)', baseUrl: 'http://localhost:11434/v1', defaultModel: 'qwen2.5-coder' /* ⚠ best-effort: user must have pulled it */, apiKeyEnv: '' },
+  { id: 'ollama-cloud', label: 'Ollama Cloud', baseUrl: 'https://ollama.com/v1', defaultModel: 'gpt-oss:120b' /* ⚠ best-effort cloud tag */, apiKeyEnv: 'OLLAMA_API_KEY' },
+  { id: 'kilocode', label: 'KiloCode', baseUrl: 'https://api.kilo.ai/api/gateway', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify namespace via /models */, apiKeyEnv: 'KILOCODE_API_KEY' },
+  { id: 'cline', label: 'Cline', baseUrl: 'https://api.cline.bot/api/v1', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify via /models */, apiKeyEnv: 'CLINE_API_KEY' },
+  // Custom: the always-works escape hatch and the only Provider whose base URL + model are
+  // user-supplied (machine-scoped wisp.baseUrl + a typed model, resolved at runtime by
+  // activeBaseUrl()). No env fallback — its key lives only in the wisp.apiKey.custom slot.
+  { id: 'custom', label: 'Custom', baseUrl: '', defaultModel: '', apiKeyEnv: '' },
+];
+
+// globalState key for the per-Provider model memory: { providerId: model }.
+const MODEL_MAP_KEY = 'wisp.models';
+
+// The Custom Provider's id — the one Provider whose base URL is user-supplied (machine-scoped
+// wisp.baseUrl) rather than hardcoded in the catalog.
+const CUSTOM_ID = 'custom';
+
 // ----------------------------- Module state ----------------------------- //
 
 let output: vscode.OutputChannel;
 let secrets: vscode.SecretStorage;
+let globalState: vscode.Memento; // per-Provider model memory ({ providerId: model }) lives here
 let statusBar: vscode.StatusBarItem;
 
 // Reuse one client; rebuild only when key/baseURL change (construction is local, no network).
@@ -96,17 +140,44 @@ let pendingInquiry: { uri: string; line: number; character: number; text: string
 
 const cfg = () => vscode.workspace.getConfiguration(CONFIG_NS);
 
-// Key resolution: SecretStorage (OS keychain) first, then the OPENCODE_API_KEY env var the
-// reference provider uses. The key is never read from plaintext settings.json.
-const resolveApiKey = async (): Promise<string> => {
-  const stored = await secrets.get(SECRET_KEY);
-  return stored?.trim() || process.env.OPENCODE_API_KEY || '';
+// The Active Provider is the source of truth. Read wisp.provider; an unknown id falls back to the
+// default row (PROVIDERS[0]) so a stale/typo'd setting can never leave us provider-less.
+const activeProvider = (): Provider =>
+  PROVIDERS.find((p) => p.id === cfg().get<string>('provider')) ?? PROVIDERS[0];
+
+// SecretStorage slot for a Provider's key: `wisp.apiKey.<id>` (the bare SECRET_KEY is the
+// pre-catalog legacy slot, migrated once on activate).
+const keySlot = (id: string): string => `${SECRET_KEY}.${id}`;
+
+// Active model: the Provider's remembered model (globalState) else its native default. Each Provider
+// keeps its own model — one global id is wrong across Providers (Zen minimax-m3 vs Groq llama-…).
+const activeModel = (): string => {
+  const map = globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {};
+  const p = activeProvider();
+  return map[p.id] || p.defaultModel;
 };
 
+// Base URL for the Active Provider. Built-ins use their hardcoded catalog URL; only Custom reads the
+// user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
+const activeBaseUrl = (): string => {
+  const p = activeProvider();
+  return p.id === CUSTOM_ID ? cfg().get<string>('baseUrl') ?? '' : p.baseUrl;
+};
+
+// Key resolution for the Active Provider: its namespaced SecretStorage slot first, then the row's own
+// env var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings.
+const resolveApiKey = async (): Promise<string> => {
+  const p = activeProvider();
+  const stored = await secrets.get(keySlot(p.id));
+  return stored?.trim() || (p.apiKeyEnv ? process.env[p.apiKeyEnv] : '') || '';
+};
+
+// Build (and cache) the client from the Active Provider's resolved {baseUrl, key}. Base URL is the
+// catalog row's (or Custom's wisp.baseUrl) — switching Provider, its key, or that URL rebuilds it.
 const getClient = async (): Promise<OpenAI | undefined> => {
   const key = await resolveApiKey();
   if (!key) return undefined;
-  const baseURL = cfg().get<string>('baseUrl') || DEFAULT_BASE_URL;
+  const baseURL = activeBaseUrl();
   if (!cachedClient || cachedClient.key !== key || cachedClient.baseURL !== baseURL) {
     cachedClient = { key, baseURL, client: new OpenAI({ apiKey: key, baseURL }) };
   }
@@ -310,7 +381,7 @@ const provider: vscode.InlineCompletionItemProvider = {
     const editor = vscode.window.activeTextEditor;
     if (editor && editor.document === document && !editor.selection.isEmpty) return;
 
-    const model = cfg().get<string>('model') || DEFAULT_MODEL;
+    const model = activeModel();
     const { prefix, suffix } = buildContext(document, position);
     if (!prefix.trim()) return; // nothing to go on
 
@@ -384,12 +455,12 @@ const provider: vscode.InlineCompletionItemProvider = {
 // Panel sync after key changes happens via the secrets.onDidChange listener in activate() —
 // it fires for our own store/delete too, and for changes made from other VS Code windows.
 const storeApiKey = async (value: string): Promise<void> => {
-  await secrets.store(SECRET_KEY, value.trim());
+  await secrets.store(keySlot(activeProvider().id), value.trim());
   cachedClient = undefined;
 };
 
 const clearApiKey = async (): Promise<void> => {
-  await secrets.delete(SECRET_KEY);
+  await secrets.delete(keySlot(activeProvider().id));
   cachedClient = undefined;
 };
 
@@ -412,8 +483,19 @@ const targetFor = (key: string): vscode.ConfigurationTarget => {
   return vscode.ConfigurationTarget.Global;
 };
 
+// Remember the chosen model under the Active Provider (globalState), then mirror it into wisp.model
+// (the config write re-syncs the panel and rebuilds the client via onDidChangeConfiguration).
 const setModel = async (id: string): Promise<void> => {
+  const p = activeProvider();
+  await globalState.update(MODEL_MAP_KEY, { ...(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}), [p.id]: id });
   await cfg().update('model', id, targetFor('model'));
+};
+
+// Keep wisp.model honestly reflecting the Active Provider's model after a raw wisp.provider edit
+// (the panel has no part in Issue 4). Guarded against a write-loop: writes only when stale.
+const mirrorActiveModel = async (): Promise<void> => {
+  const m = activeModel();
+  if (cfg().get<string>('model') !== m) await cfg().update('model', m, targetFor('model'));
 };
 
 const setEnabled = async (value: boolean): Promise<void> => {
@@ -421,18 +503,56 @@ const setEnabled = async (value: boolean): Promise<void> => {
   renderStatus();
 };
 
+// Switch the Active Provider. Machine-scoped write — selecting a Provider selects where the bearer
+// key is sent. The config listener does the rest (invalidate client, re-mirror wisp.model, postState).
+const setProvider = async (id: string): Promise<void> => {
+  await cfg().update('provider', id, targetFor('provider'));
+  cachedClient = undefined;
+};
+
+// Custom's base URL (machine-scoped — same key-redirect threat as the Provider selector). Built-ins
+// ignore wisp.baseUrl; only Custom resolves from it (activeBaseUrl). The config listener rebuilds.
+const setBaseUrl = async (url: string): Promise<void> => {
+  await cfg().update('baseUrl', url, targetFor('baseUrl'));
+  cachedClient = undefined;
+};
+
 // Everything the panel is allowed to know — key presence and source only, never the key itself.
 // keySource keeps the UI honest when the key comes from the env var (Clear can't remove that).
 const getState = async (): Promise<PanelState> => {
-  const stored = (await secrets.get(SECRET_KEY))?.trim();
-  const keySource = stored ? 'stored' : process.env.OPENCODE_API_KEY ? 'env' : 'none';
+  const p = activeProvider();
+  const stored = (await secrets.get(keySlot(p.id)))?.trim();
+  const keySource = stored ? 'stored' : p.apiKeyEnv && process.env[p.apiKeyEnv] ? 'env' : 'none';
   return {
     keyIsSet: keySource !== 'none',
     keySource,
-    model: cfg().get<string>('model') || DEFAULT_MODEL,
+    keyEnv: p.apiKeyEnv, // shown in the env-key hint so it names the active Provider's var, not Zen's
+    model: activeModel(),
     enabled: cfg().get<boolean>('enabled', true),
-    baseUrl: cfg().get<string>('baseUrl') || DEFAULT_BASE_URL,
+    baseUrl: activeBaseUrl(),
+    providerId: p.id,
+    providers: PROVIDERS.map((r) => ({ id: r.id, label: r.label })), // drives the panel dropdown
+    isCustom: p.id === CUSTOM_ID,
   };
+};
+
+// ----------------------------- Migration ----------------------------- //
+
+// One-time, silent: the pre-catalog key lived in the bare `wisp.apiKey` slot with the model in
+// `wisp.model`. Zen was the only Provider that existed then, so that key is provably the Zen key —
+// copy it into Zen's namespaced slot + globalState model record, then delete the legacy slot. No-op
+// the moment the Zen slot exists, so it runs at most once and can never lose a key.
+const migrateLegacyKey = async (): Promise<void> => {
+  const zenSlot = keySlot('opencode-zen');
+  if (await secrets.get(zenSlot)) return;
+  const legacy = await secrets.get(SECRET_KEY);
+  if (!legacy) return;
+  await secrets.store(zenSlot, legacy);
+  const legacyModel = cfg().get<string>('model');
+  if (legacyModel) {
+    await globalState.update(MODEL_MAP_KEY, { ...(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}), 'opencode-zen': legacyModel });
+  }
+  await secrets.delete(SECRET_KEY);
 };
 
 // ----------------------------- Commands ----------------------------- //
@@ -499,7 +619,7 @@ const inquire = async (): Promise<void> => {
   const { content, truncated } = buildInquiryPrompt(document, caret, selectionText);
   if (truncated) vscode.window.showInformationMessage('Wisp: file too big — used nearby context.');
 
-  const model = cfg().get<string>('model') || DEFAULT_MODEL;
+  const model = activeModel();
   // Bridge the progress notification's Cancel to an AbortController so it also kills the HTTP call.
   const controller = new AbortController();
   enterInFlight();
@@ -561,6 +681,8 @@ const inquire = async (): Promise<void> => {
 export const activate = (context: vscode.ExtensionContext): void => {
   output = vscode.window.createOutputChannel('Wisp');
   secrets = context.secrets;
+  globalState = context.globalState;
+  void migrateLegacyKey(); // silent one-time wisp.apiKey → wisp.apiKey.opencode-zen
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = 'wisp.toggle';
@@ -575,6 +697,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
     fetchModelIds,
     setModel,
     setEnabled,
+    setProvider,
+    setBaseUrl,
   });
 
   context.subscriptions.push(
@@ -589,15 +713,22 @@ export const activate = (context: vscode.ExtensionContext): void => {
     vscode.commands.registerCommand('wisp.inquire', inquire),
     // Keep derived state in sync when settings change out from under us.
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('wisp.baseUrl')) cachedClient = undefined;
+      // Active Provider, its (Custom) base URL, or its mirrored model changed → rebuild the client.
+      if (e.affectsConfiguration('wisp.provider') || e.affectsConfiguration('wisp.baseUrl') || e.affectsConfiguration('wisp.model')) cachedClient = undefined;
+      // A raw wisp.provider edit (no panel in Issue 4) must re-mirror wisp.model to the new Provider.
+      if (e.affectsConfiguration('wisp.provider')) void mirrorActiveModel();
       if (e.affectsConfiguration('wisp.enabled')) renderStatus();
       // Any of our settings may be on screen in the panel — mirror every change there.
       if (e.affectsConfiguration(CONFIG_NS)) void panel?.postState();
     }),
-    // Single sync point for key changes: fires for this window's store/delete and for
-    // changes made in other VS Code windows sharing the same SecretStorage.
+    // Single sync point for key changes: fires for this window's store/delete and for changes made
+    // in other windows sharing SecretStorage. Any wisp.apiKey* slot (legacy or namespaced) → drop
+    // the cached client and re-sync the panel.
     context.secrets.onDidChange((e) => {
-      if (e.key === SECRET_KEY) void panel?.postState();
+      if (e.key === SECRET_KEY || e.key.startsWith(`${SECRET_KEY}.`)) {
+        cachedClient = undefined;
+        void panel?.postState();
+      }
     }),
   );
 };
