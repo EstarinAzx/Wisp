@@ -221,6 +221,60 @@ Architectural decisions:
   checks (launch the Extension Development Host, exercise the panel) rather than unit tests. M3 could
   later get light tests against a stubbed SDK if its surface grows.
 
+## Multi-provider — a Provider catalog (added 2026-06-15)
+
+Wisp is provider-agnostic by design (see `CONTEXT.md`); today it ships a single Provider (OpenCode
+Zen). This adds a **Provider catalog** so a developer can pick a different backend without editing a
+base URL by hand, and switch between backends without re-pasting keys.
+
+As experienced by the user: a **Provider dropdown** at the top of the side panel lists several ready
+Providers — OpenCode Zen (default), OpenAI, Groq, Mistral, OpenRouter, Ollama (local), Ollama Cloud,
+KiloCode, Cline — plus a **Custom** entry for any other OpenAI-compatible endpoint. Picking one
+re-points completions at that backend and shows *its* key and *its* models; each Provider remembers
+its own key and last-used model, so switching is one click, not a reconfigure. Only **Custom** asks
+for a base URL — the built-ins already know theirs.
+
+Decisions (full rationale in `decisions.md`, 2026-06-15):
+
+- **Config-only, one SDK.** Every catalog Provider is an OpenAI-compatible chat endpoint reached with
+  an API key (Bearer), so all of them run through the **existing M3 ProviderClient** (the Provider
+  boundary in code) by swapping `{ baseUrl, key, model }`. No new client, no OAuth subsystem. GitHub
+  Copilot and Cursor were evaluated and **dropped** — Copilot's only path is reverse-engineered client
+  impersonation (account-ban risk); Cursor's API is shape-incompatible (no chat-completions) and
+  "auth-only" use means session-token piggybacking (ToS violation). OAuth would not fix either.
+- **Active Provider is the source of truth.** State is an Active Provider id (`wisp.provider`) plus a
+  per-Provider record `{ key, model }`: keys in namespaced SecretStorage slots `wisp.apiKey.<id>` with
+  a per-Provider env-var fallback; model memory in extension `globalState`; `wisp.model` mirrors the
+  active model. Built-in base URLs are hardcoded in the catalog. No model-id transform — each Provider's
+  default model ships in its native format.
+- **Security: `wisp.provider` is machine-scoped.** Selecting a Provider selects where the bearer key is
+  sent, so the selector inherits `baseUrl`'s machine-scope; a workspace cannot silently redirect the
+  key. Built-in URLs in code (not settings) close the same hole.
+- **Silent one-time migration.** The existing `wisp.apiKey` is the OpenCode Zen key (Zen is the only
+  Provider today), so it migrates unambiguously to `wisp.apiKey.opencode-zen` (+ model) with no
+  re-entry.
+- **Cline ToS.** Cline ships user-supplied-key only with a one-line "you are responsible for your own
+  ToS compliance" note. Built-in default models are best-effort presets (verified against each
+  `/models` at build); Custom is the always-works fallback.
+
+Delivered as four tracer-bullet slices in `issues.md`: **Issue 4** (active-Provider plumbing +
+migration — the thin end-to-end switch, no UI), **Issue 5** (panel dropdown + switch UX), **Issue 6**
+(the full 9-Provider catalog), **Issue 7** (Custom Provider + the Cline note). Issues 5 and 6 are
+independent once 4 lands; 7 depends on both.
+
+Additional user stories:
+
+40. As a developer, I want to pick my Provider from a dropdown in the panel, so that I can change
+    backend without hand-editing a base URL.
+41. As a developer, I want each Provider to remember its own API key, so that switching Providers does
+    not make me re-paste a key I already entered.
+42. As a developer, I want each Provider to remember its own model, so that switching does not leave a
+    stale model id that the new backend rejects.
+43. As a developer, I want a Custom Provider where I supply the base URL and model, so that I can reach
+    any OpenAI-compatible endpoint not in the catalog.
+44. As a developer, I want my Provider choice to be machine-scoped, so that a workspace I open cannot
+    silently redirect my API key to another endpoint.
+
 ## Out of Scope
 
 - A fill-in-middle (FIM) model or endpoint — the provider does not offer one.

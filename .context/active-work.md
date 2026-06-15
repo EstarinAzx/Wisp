@@ -8,44 +8,51 @@ tags: [context, active-work]
 # Active Work
 
 _Last updated: 2026-06-15 by Opus 4.8 (auto)_
-_At commit: uncommitted (rebrand across package.json, src/*, webview, docs) on branch `docs/inquire-spec` off `main`_
+_At commit: about to branch `feat/multi-provider-catalog` off `main` and commit the multi-provider
+**spec** (PRD/issues/CONTEXT/ADR/gotchas) — docs only, no code yet. Rebrand (Issue 3) is committed on
+`main` (`de959be`)._
 
 ## Current focus
-**Issue 3 — rebrand the product to Wisp** (provider/product split). Pure mechanical rename, **no
-behavior change**: the product is now **Wisp**; **OpenCode Zen** is the (current, first) **Provider**.
-Done + grilled; ready to land. Sets up future multi-provider work.
+**Multi-provider — a Provider catalog.** Planning done this session (grill-with-docs → PRD → Issues
+4–7). The feature adds a curated **Provider catalog** (9 built-in + Custom, all OpenAI-compatible +
+API-key) with a panel **Provider picker** and **per-Provider key + model memory**, built on the
+**Active Provider = source of truth** model. **Next: implement Issue 4** (active-provider plumbing +
+silent key migration — the thin end-to-end tracer) on the new branch. No code written yet.
 
 ## State
-- **In flight:** nothing — Issue 3 built, compiles clean, packaged `wisp-0.0.5.vsix`.
-- **Done this session:**
-  - Product identifiers `opencodeAutocomplete`/"OpenCode" → `wisp`/"Wisp": `package.json` (name,
-    v0.0.5, container/view ids+titles, 4 command ids+titles, menu, config title, 8 setting keys, icon),
-    `src/extension.ts` (`CONFIG_NS`, `SECRET_KEY=wisp.apiKey`, status bar, output channel "Wisp", all
-    `Wisp:` toasts, `registerCommand`s, `affectsConfiguration`s, class refs), `src/sidePanelProvider.ts`
-    (`WispPanelProvider`, `viewId=wisp.panel`, `<title>`), `webview/app.tsx` (key placeholder).
-  - `media/opencode.svg` → `media/wisp.svg` (git mv, same glyph); lockfile synced to `wisp`/`0.0.5`.
-  - **Provider plumbing untouched** (`DEFAULT_BASE_URL`, `OPENCODE_API_KEY`, "OpenCode Zen provider").
-  - Docs: README rewritten + drive-by fixes (`minimax-m3`, `maxTokens` 0) + Inquire synced; `CONTEXT.md`,
-    `PRD.md`, all `.context/*` updated; rebrand ADR in `decisions.md`.
-  - **Grill (shared understanding):** `CONTEXT.md` gained **Provider** (first-class swappable role),
-    canonical **OpenCode Zen** name (vendor+product; gateway excluded), "the extension" blessed synonym;
-    `PRD.md` M3 `OpenCodeClient` → **`ProviderClient`**.
+- **In flight:** nothing — multi-provider is **specced, not built**. Docs about to be committed on a
+  feature branch; Issue 4 implementation is the next session's job.
+- **Done this session (planning only, no code):**
+  - **Studied** `D:\Mods\xethryon\new agent\XETH--7`'s provider strategy (env-flag selection, profile
+    builders, smart router, LiteLLM). Lifted the transferable core: **a catalog of OpenAI-compatible
+    rows reached by one SDK** — dropped the heavy routing/OAuth/profile machinery (overkill for Wisp).
+  - **Researched** (background workflow, web + adversarial verify) the 5 user-requested extras:
+    **Ollama Cloud / KiloCode / Cline** are plain **API-key, first-party, OpenAI-compatible** gateways
+    (KiloCode & Cline are NOT OAuth) → ship. **GitHub Copilot** (reverse-eng/ban risk) + **Cursor**
+    (shape-incompatible, session-piggyback ToS) → **dropped**. So **no OAuth subsystem** needed.
+  - **Grill-with-docs:** settled the design tree (preset picker + per-Provider key/model memory;
+    machine-scope security; Active Provider = source of truth; silent key migration; 9-built-in catalog
+    + Custom; panel switch UX; terminology). `CONTEXT.md` +4 terms; multi-provider **ADR** in
+    `decisions.md`; 3 new `gotchas.md` entries.
+  - **PRD.md:** multi-provider section + user stories 40–44. **issues.md:** **Issues 4–7** (judge-panel
+    tracer-bullet decomposition).
 - **Blocked:** nothing.
 
 ## Pick up here
-Issue 3 is **done**; about to commit. `issues.md` has no open slices (Issues 1–3 all done). Next:
-1. **Ship** — `/preset ship` to push `docs/inquire-spec` + open a PR (not pushed; wrap-up commits only).
-2. **F5 smoke test** — the one unrun Issue 3 criterion: install `wisp-0.0.5.vsix` (or F5), confirm it
-   loads as "Wisp", four `Wisp: …` commands appear, settings under `wisp.*`; the previously stored key
-   is **orphaned** by design → run **Wisp: Set API Key**, then confirm Completion **and** Inquire work.
-3. New work → add an `issues.md` slice first.
+Spec done; about to branch `feat/multi-provider-catalog` + commit the docs. **Next task: implement
+Issue 4** — Active-Provider plumbing + silent key migration (the thin end-to-end tracer: a 2-row
+`PROVIDERS` catalog, machine-scoped `wisp.provider`, per-Provider `wisp.apiKey.<id>` + env fallback,
+globalState model memory, silent `wisp.apiKey` → `wisp.apiKey.opencode-zen` migration; **no UI**).
+Then Issues 5 (panel dropdown) ∥ 6 (full 9-provider catalog) → 7 (Custom + Cline note). Full acceptance
+criteria in `issues.md`; rationale in `decisions.md` (2026-06-15 multi-provider ADR).
 
 ## Skills for next session
-- `/preset ship` — push + PR for the rebrand build.
+- `/preset pick-up` — reads the handoff note and resumes Issue 4 on the feature branch.
+- `/tdd` for Issue 4's pure pieces if any emerge (migration guard is testable).
 
 ## Open questions
-- None blocking. Future (out of this issue): a second **Provider** — multi-provider architecture +
-  provider-switching UI + logo redesign are deferred to later issues (see `decisions.md` rebrand ADR).
+- None blocking. KiloCode/Cline/Ollama-Cloud **default model ids** are best-effort presets — verify each
+  against `GET /models` when building Issue 6 (`issues.md` notes this).
 
 ## Recent context
 - The rename is **breaking**: setting namespace + SecretStorage key both moved, so any previously
