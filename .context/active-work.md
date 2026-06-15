@@ -1,55 +1,52 @@
 ---
 type: active-work
 project: opencode-autocomplete
-updated: 2026-06-14
+updated: 2026-06-15
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-14 by Opus 4.8_
-_At commit: uncommitted (CONTEXT.md, PRD.md, issues.md) on a feature branch off `main`_
+_Last updated: 2026-06-15 by Opus 4.8_
+_At commit: uncommitted (issues.md, package.json, src/extension.ts, .context/*) on branch `docs/inquire-spec` off `main`_
 
 ## Current focus
-Spec'd a **new feature, Inquire**, end-to-end via a `/grill-with-docs` session — **no code this
-session**. Inquire = a **manual, whole-file-context, insertable-code** suggestion: select lines →
-right-click **OpenCode: Inquire** → the selection is the prompt, the whole file is context, and the
-result lands as ghost text **after** the selection (append, never replace). It works **even when
-Completion is disabled**. It returns **code only, never prose** — chat/explanation was explicitly
-rejected. Terms fixed in `CONTEXT.md`; design captured in `PRD.md`; build captured as **Issue 2**.
+**Built Issue 2 — Inquire** (manual, whole-file, insertable-code suggestion). Eyeball/F5 **passed** —
+the spike (the one unproven assumption) holds: `editor.action.inlineSuggest.trigger` + a stashed
+pending result renders ghost text at a collapsed caret after the selection. All Issue 2 acceptance
+criteria checked in `issues.md`.
 
 ## State
-- **In flight:** nothing — planning is done; Issue 2 is ready to build.
+- **In flight:** nothing — Issue 2 is built, compiles clean, packaged, and eyeball-verified.
 - **Done this session:**
-  - `CONTEXT.md` — new terms **Suggestion / Completion / Inquire / Selection-as-prompt** (resolves the
-    "suggestion" overload: it names the ghost-text surface, shared by both triggers).
-  - `PRD.md` — Solution part 3 (Inquire), user stories #33–#39, an "Inquire" implementation-decisions
-    block (6 settled choices + the spike risk), deferred modes in Out of Scope.
-  - `issues.md` — header de-staled (repo **is** git now); **Issue 2 — Inquire** appended, spike-first.
+  - `src/extension.ts` — `inquire` command; module-level `pendingInquiry`; provider **early-return**
+    (before the enabled/selection/debounce/cache gates) returning the stash on caret match;
+    `INQUIRE_SYSTEM_PROMPT`; `buildInquiryPrompt` (whole-file context, ~32k-char guard →
+    windowed `buildContext(24000/6000)` fallback); cancellable `withProgress`; reuses
+    `stripThink`/`stripFences`/`relocateAfterComment`; `enter/exitInFlight` for Activity.
+  - `buildContext` gained optional `maxPrefixChars`/`maxSuffixChars` overrides (completion path
+    unchanged — undefined → config defaults).
+  - `package.json` — `inquire` command + `editor/context` menu (`when: editorHasSelection`);
+    version 0.0.3 → **0.0.4**.
+  - `issues.md` — Issue 2 criteria all `[X]`.
+  - Packaged `opencode-autocomplete-0.0.4.vsix`.
 - **Blocked:** nothing.
 
 ## Pick up here
-**Issue 2 — Inquire** (`issues.md`). Spike-first:
-1. **Step 0 spike** — confirm `editor.action.inlineSuggest.trigger` + a stashed pending result renders
-   ghost text at a **collapsed caret after a selection**. If it does NOT, stop and revisit the
-   answer-surface decision before building. This is the one unproven assumption.
-2. Then build per Issue 2: new `opencodeAutocomplete.inquire` command + `editor/context` menu
-   (`when: editorHasSelection`) + palette; module-level `pendingInquiry`; provider early-return
-   **before** the enabled/selection/debounce/cache gates; `INQUIRE_SYSTEM_PROMPT`; whole-file context
-   with a ~32k-char size guard (fall back to a `buildContext` window + "file too big" toast);
-   cancellable `withProgress`; reuse `stripThink`/`stripFences`/`relocateAfterComment` + the `model`
-   setting. `package.json` 0.0.3 → 0.0.4. No webview change.
-
-Consider `/preset scope` before coding, and `/tdd` for any pure helper extracted (size-guard slicer).
+Issue 2 (and Issue 1) are **done**. `issues.md` has no open slices. Next options:
+1. **Ship** — `/preset ship` to push `docs/inquire-spec` + open a PR (branch name is doc-era; the build
+   lives on it). Not pushed yet (wrap-up commits only).
+2. **Carried-forward** options below (faster model, TDD M1/M2).
+3. New slice — needs a fresh `issues.md` entry first.
 
 ## Skills for next session
-- `/preset scope` — entry gate before the Inquire build.
-- `/tdd` — if the size-guard context slicer is extracted as a pure fn (and the still-untested M1/M2
-  pure fns remain a standing option — see below).
+- `/preset ship` — push + PR for the Inquire build.
+- `/tdd` — if M1/M2 pure fns (or the new `buildInquiryPrompt` size-guard slicer) get tests.
 
 ## Open questions
-- None for Inquire — every fork was resolved in the grill (surface, append-vs-replace, size cap,
-  feedback, edge cases). The only unknown is the **spike** (does manual ghost-text trigger render).
+- None blocking. Minor: non-comment selections rely on `relocateAfterComment` only for the newline —
+  a selection ending mid-line (not a whole-line comment) appends at the caret without a forced newline.
+  Acceptable per spec (comment-as-instruction is the primary flow); revisit only if it grates.
 
 ## Carried-forward (pre-Inquire) options, still open
 1. **Faster default model** — `minimax-m3` is a reasoning model (4–7.6s). Try `deepseek-v4-flash` /
@@ -58,12 +55,14 @@ Consider `/preset scope` before coding, and `/tdd` for any pure helper extracted
 2. **TDD M1 + M2** — pure fns in `src/extension.ts` still untested + unexported. Spec in `PRD.md`.
 
 ## Recent context
-- "Inquire" reuses the existing **ghost-text surface** and the whole cleanup pipeline — it is
-  Completion's manual, whole-file twin, not a new UI. Picked because the user wants the answer to feel
-  exactly like an autocomplete suggestion.
-- Append-after (not replace) was chosen for **data safety**: a loose reasoning model returning junk
-  must never eat the user's selected code. See [[decisions]].
-- The pick-up note's "repo is non-git" landmine is **stale** — the repo is git (branch `main`).
+- Inquire reuses Completion's **ghost-text surface** + cleanup pipeline — it is Completion's manual,
+  whole-file twin. The mechanic: collapse the selection (inline ghost text won't render while a
+  selection is active), stash a result keyed to document + collapsed caret, fire
+  `inlineSuggest.trigger`; the provider hands it back before any gate, then clears it.
+- **Append, never replace; code only, never prose** — both alternatives stay rejected (data-loss /
+  wrong-surface). The zero-width insert range guarantees append.
+- Stale doc nits (not touched, surgical): `overview.md` still says "repo is non-git"; `api.md` still
+  lists `maxTokens` default `64` (actual `0`). Pre-existing — fix only if revisiting those files.
 
 ## Related
 - [[overview]]

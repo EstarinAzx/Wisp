@@ -38,14 +38,14 @@ extension already tracks in-flight completion requests for the status bar
 
 ### Acceptance criteria
 
-- [ ] `enterInFlight`/`exitInFlight` call `panel?.postActivity(true/false)` in addition to `renderStatus()`.
-- [ ] `postActivity` posts `{ type: 'activity', thinking }` only when a view exists (no-op when hidden), mirroring `postState`.
-- [ ] The `ready` handler pushes the current activity (`inFlight > 0`) alongside the first `postState`.
-- [ ] Webview keeps `thinking` separate from `state`; renders a top row above API Key: pulse dot + "Thinking…" / "Idle".
-- [ ] Row is muted (`opacity-50`) when `state.enabled` is false; un-mutes when re-enabled — live.
-- [ ] No new term leaks: panel reads "Thinking…" / "Idle"; status bar wording unchanged.
-- [ ] `tsc -p ./` and `tsc -p webview` clean; `vite build` clean.
-- [ ] Manual verify in the Extension Development Host (F5): typing fires a request → dot pulses "Thinking…", settles to "Idle"; toggle off → row greys.
+- [X] `enterInFlight`/`exitInFlight` call `panel?.postActivity(true/false)` in addition to `renderStatus()`.
+- [X] `postActivity` posts `{ type: 'activity', thinking }` only when a view exists (no-op when hidden), mirroring `postState`.
+- [X] The `ready` handler pushes the current activity (`inFlight > 0`) alongside the first `postState`.
+- [X] Webview keeps `thinking` separate from `state`; renders a top row above API Key: pulse dot + "Thinking…" / "Idle".
+- [X] Row is muted (`opacity-50`) when `state.enabled` is false; un-mutes when re-enabled — live.
+- [X] No new term leaks: panel reads "Thinking…" / "Idle"; status bar wording unchanged.
+- [X] `tsc -p ./` and `tsc -p webview` clean; `vite build` clean.
+- [X] Manual verify in the Extension Development Host (F5): typing fires a request → dot pulses "Thinking…", settles to "Idle"; toggle off → row greys.
 
 ---
 
@@ -99,22 +99,22 @@ Works even when Completion is disabled. Inquire returns **code only, never prose
 
 ### Acceptance criteria
 
-- [ ] **Step 0 — spike:** confirm `editor.action.inlineSuggest.trigger` + a stashed pending result
+- [X] **Step 0 — spike:** confirm `editor.action.inlineSuggest.trigger` + a stashed pending result
   renders ghost text at a collapsed caret right after a selection. If it does **not**, stop and revisit
   the answer-surface decision before building the rest.
-- [ ] `opencodeAutocomplete.inquire` registered; shows in the editor right-click menu **only** with a
+- [X] `opencodeAutocomplete.inquire` registered; shows in the editor right-click menu **only** with a
   selection, and in the command palette.
-- [ ] Select a comment + Inquire → implementing code appears as ghost text on a new line **after** the
+- [X] Select a comment + Inquire → implementing code appears as ghost text on a new line **after** the
   comment; Tab inserts it; the selected comment is preserved (append, never replace).
-- [ ] The request includes the **whole file** as context (verify via the output log); over the size
+- [X] The request includes the **whole file** as context (verify via the output log); over the size
   threshold it falls back to a windowed context with the "file too big" toast.
-- [ ] Inquire works with `enabled: false` (autocomplete off) — still returns a suggestion.
-- [ ] A cancellable progress notification shows while running; Cancel aborts the HTTP request; status
+- [X] Inquire works with `enabled: false` (autocomplete off) — still returns a suggestion.
+- [X] A cancellable progress notification shows while running; Cancel aborts the HTTP request; status
   bar + panel show "Thinking…" during, "Idle" after.
-- [ ] No selection (palette) → "Select the lines to inquire about." No key → "Set your OpenCode API key
+- [X] No selection (palette) → "Select the lines to inquire about." No key → "Set your OpenCode API key
   first." Neither path fires a request.
-- [ ] Inquire neither reads nor writes the `lastResult` completion cache.
-- [ ] `relocateAfterComment` / `stripThink` / `stripFences` reused — no doubled `<think>` or fences in
+- [X] Inquire neither reads nor writes the `lastResult` completion cache.
+- [X] `relocateAfterComment` / `stripThink` / `stripFences` reused — no doubled `<think>` or fences in
   inserted code.
-- [ ] `tsc -p ./` clean (`tsc -p webview` unaffected); `vite build` clean; repackaged `.vsix`.
-- [ ] Manual verify in the Extension Development Host (F5).
+- [X] `tsc -p ./` clean (`tsc -p webview` unaffected); `vite build` clean; repackaged `.vsix`.
+- [X] Manual verify in the Extension Development Host (F5).

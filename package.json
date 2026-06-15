@@ -2,7 +2,7 @@
   "name": "opencode-autocomplete",
   "displayName": "OpenCode Zen Autocomplete",
   "description": "AI inline completions routed through the OpenCode Zen (go) OpenAI-compatible endpoint.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "local",
   "private": true,
   "engines": {
@@ -47,8 +47,21 @@
       {
         "command": "opencodeAutocomplete.toggle",
         "title": "OpenCode: Toggle Autocomplete"
+      },
+      {
+        "command": "opencodeAutocomplete.inquire",
+        "title": "OpenCode: Inquire"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "opencodeAutocomplete.inquire",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        }
+      ]
+    },
     "configuration": {
       "title": "OpenCode Zen Autocomplete",
       "properties": {

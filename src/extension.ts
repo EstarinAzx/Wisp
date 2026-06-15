@@ -53,6 +53,20 @@ const SYSTEM_PROMPT =
   'own line, and never continue or extend a comment. ' +
   'Return an empty string if nothing should be inserted.';
 
+// Inquire (manual, whole-file): the selection is the instruction, the whole file is the context,
+// and the answer is insertable code only — never prose, so it can live in the same ghost-text surface.
+const INQUIRE_SYSTEM_PROMPT =
+  'You are a coding assistant inside a code editor. ' +
+  'You are given the full contents of a file and a block of lines the user selected as an instruction. ' +
+  'Implement exactly what the selected lines ask for. ' +
+  'Return ONLY the code to insert immediately after the selection — no explanation, no prose, no markdown fences. ' +
+  'Match the file’s existing indentation and style. ' +
+  'Return an empty string if there is nothing to add.';
+
+// Above this many characters, sending the whole file risks overflowing the model context window,
+// so Inquire falls back to a large window around the selection instead.
+const INQUIRE_CONTEXT_LIMIT = 32000;
+
 // ----------------------------- Module state ----------------------------- //
 
 let output: vscode.OutputChannel;
@@ -72,6 +86,11 @@ let lastError = false;
 
 // Side panel handle so key/config changes can push fresh state into the webview.
 let panel: OpenCodePanelProvider | undefined;
+
+// Inquire stashes its one-shot result here; the inline provider returns it (before every normal
+// gate, even when completion is disabled) when the caret matches, then clears it. Keyed to the
+// document + the collapsed caret at the selection's end so a stray fire elsewhere can't grab it.
+let pendingInquiry: { uri: string; line: number; character: number; text: string } | undefined;
 
 // ----------------------------- Configuration ----------------------------- //
 
@@ -97,9 +116,14 @@ const getClient = async (): Promise<OpenAI | undefined> => {
 // ----------------------------- Text utilities ----------------------------- //
 
 // Slice the document into the {prefix, suffix} window sent as context (one read, both slices).
-const buildContext = (doc: vscode.TextDocument, pos: vscode.Position): { prefix: string; suffix: string } => {
-  const maxPrefix = cfg().get<number>('maxPrefixChars') ?? 2000;
-  const maxSuffix = cfg().get<number>('maxSuffixChars') ?? 1000;
+const buildContext = (
+  doc: vscode.TextDocument,
+  pos: vscode.Position,
+  maxPrefixChars?: number,
+  maxSuffixChars?: number,
+): { prefix: string; suffix: string } => {
+  const maxPrefix = maxPrefixChars ?? cfg().get<number>('maxPrefixChars') ?? 2000;
+  const maxSuffix = maxSuffixChars ?? cfg().get<number>('maxSuffixChars') ?? 1000;
   const full = doc.getText();
   const offset = doc.offsetAt(pos);
   return {
@@ -110,6 +134,26 @@ const buildContext = (doc: vscode.TextDocument, pos: vscode.Position): { prefix:
 
 const buildUserPrompt = (languageId: string, prefix: string, suffix: string): string =>
   `Language: ${languageId}\n\n${prefix}<CURSOR>${suffix}`;
+
+// Inquire's user message: the whole file plus the selection marked as the instruction. Over
+// INQUIRE_CONTEXT_LIMIT the whole file is swapped for a large window around the selection (reusing
+// buildContext) so a big file degrades to nearby context instead of overflowing the model.
+const buildInquiryPrompt = (
+  document: vscode.TextDocument,
+  caret: vscode.Position,
+  selectionText: string,
+): { content: string; truncated: boolean } => {
+  const header = `The user selected these lines as an instruction:\n${selectionText}`;
+  const full = document.getText();
+  if (full.length <= INQUIRE_CONTEXT_LIMIT) {
+    return { content: `Language: ${document.languageId}\n\nFull file:\n${full}\n\n${header}`, truncated: false };
+  }
+  const { prefix, suffix } = buildContext(document, caret, 24000, 6000);
+  return {
+    content: `Language: ${document.languageId}\n\nFile excerpt around the selection:\n${prefix}<CURSOR>${suffix}\n\n${header}`,
+    truncated: true,
+  };
+};
 
 // Reasoning models (e.g. minimax-m3) emit their chain-of-thought inline as a <think>…</think>
 // block before the real completion — strip it so the ghost text is the answer, not the thinking.
@@ -243,6 +287,20 @@ const exitInFlight = () => { inFlight = Math.max(0, inFlight - 1); renderStatus(
 
 const provider: vscode.InlineCompletionItemProvider = {
   async provideInlineCompletionItems(document, position, context, token) {
+    // Inquire's manual ghost-text path. Runs BEFORE every normal gate: Inquire works with completion
+    // disabled, ignores the selection/debounce checks, and must not read or write the completion
+    // cache. Match on document + collapsed caret, hand back the stash, then clear it.
+    if (
+      pendingInquiry &&
+      pendingInquiry.uri === document.uri.toString() &&
+      pendingInquiry.line === position.line &&
+      pendingInquiry.character === position.character
+    ) {
+      const text = pendingInquiry.text;
+      pendingInquiry = undefined;
+      return [new vscode.InlineCompletionItem(text, new vscode.Range(position, position))];
+    }
+
     if (!cfg().get<boolean>('enabled', true)) return;
 
     // Gating: drop obviously-wasted fires before spending anything.
@@ -418,6 +476,86 @@ const listModels = async (): Promise<void> => {
 // Flip the enabled flag (also bound to the status-bar click).
 const toggle = (): Promise<void> => setEnabled(!cfg().get<boolean>('enabled', true));
 
+// Inquire: select lines → the selection is the prompt, the whole file is context → insertable code
+// as ghost text after the selection (append, never replace). Works even when completion is disabled.
+const inquire = async (): Promise<void> => {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+  if (editor.selection.isEmpty) {
+    // Only reachable via the palette — the right-click item is gated on editorHasSelection.
+    vscode.window.showWarningMessage('Select the lines to inquire about.');
+    return;
+  }
+  if (!(await resolveApiKey())) {
+    vscode.window.showWarningMessage("Set your OpenCode API key first (command: 'OpenCode: Set API Key').");
+    return;
+  }
+  const client = await getClient();
+  if (!client) return;
+
+  const document = editor.document;
+  const caret = editor.selection.end; // collapsed caret = end of selection; code is appended here
+  const selectionText = document.getText(editor.selection);
+  const { content, truncated } = buildInquiryPrompt(document, caret, selectionText);
+  if (truncated) vscode.window.showInformationMessage('OpenCode: file too big — used nearby context.');
+
+  const model = cfg().get<string>('model') || DEFAULT_MODEL;
+  // Bridge the progress notification's Cancel to an AbortController so it also kills the HTTP call.
+  const controller = new AbortController();
+  enterInFlight();
+  const started = Date.now();
+  let text = '';
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'OpenCode: inquiring…', cancellable: true },
+      async (_progress, token) => {
+        token.onCancellationRequested(() => controller.abort());
+        const maxTokens = cfg().get<number>('maxTokens') ?? 0;
+        const res = await client.chat.completions.create(
+          {
+            model,
+            messages: [
+              { role: 'system', content: INQUIRE_SYSTEM_PROMPT },
+              { role: 'user', content },
+            ],
+            ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
+            temperature: cfg().get<number>('temperature') ?? 0.1,
+          },
+          { signal: controller.signal },
+        );
+        // Code only: strip reasoning + fences, then push code off a selected comment line onto its own.
+        const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+        text = relocateAfterComment(document, caret, stripFences(stripThink(res.choices[0]?.message?.content ?? '')), eol);
+      },
+    );
+    lastError = false;
+    output.appendLine(
+      `inquire ${model} ${Date.now() - started}ms ${text.length}c ctx=${content.length}c${truncated ? ' (windowed)' : ' (whole-file)'}`,
+    );
+  } catch (err) {
+    // Cancelling via the notification is normal (aborts); only surface real failures.
+    if (!controller.signal.aborted) {
+      lastError = true;
+      output.appendLine(`[error] inquire ${String(err)}`);
+      vscode.window.showErrorMessage(`OpenCode: inquire failed — ${String(err)}`);
+    }
+    return;
+  } finally {
+    exitInFlight();
+  }
+
+  if (!text.trim()) {
+    vscode.window.showInformationMessage('OpenCode: nothing to insert.');
+    return;
+  }
+
+  // Inline ghost text will not render while a selection is active → collapse to the caret, stash the
+  // result keyed to that exact position, then ask VS Code to query the inline provider.
+  editor.selection = new vscode.Selection(caret, caret);
+  pendingInquiry = { uri: document.uri.toString(), line: caret.line, character: caret.character, text };
+  await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+};
+
 // ----------------------------- Activation ----------------------------- //
 
 export const activate = (context: vscode.ExtensionContext): void => {
@@ -448,6 +586,7 @@ export const activate = (context: vscode.ExtensionContext): void => {
     vscode.commands.registerCommand('opencodeAutocomplete.setApiKey', setApiKey),
     vscode.commands.registerCommand('opencodeAutocomplete.listModels', listModels),
     vscode.commands.registerCommand('opencodeAutocomplete.toggle', toggle),
+    vscode.commands.registerCommand('opencodeAutocomplete.inquire', inquire),
     // Keep derived state in sync when settings change out from under us.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('opencodeAutocomplete.baseUrl')) cachedClient = undefined;

@@ -1,7 +1,7 @@
 ---
 type: pick-up
 project: opencode-autocomplete
-updated: 2026-06-14
+updated: 2026-06-15
 tags: [context, pick-up]
 ---
 
@@ -9,32 +9,28 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate the project.
 
-**Last task finished (2026-06-14):** spec'd a new feature, **Inquire**, via `/grill-with-docs` —
-**docs only, no code**. Inquire = a **manual, whole-file-context, insertable-code** suggestion: select
-lines → right-click **OpenCode: Inquire** → selection is the prompt, whole file is context, result is
-ghost text **after** the selection (append, never replace). Works **even when Completion is disabled**;
-returns **code only, never prose**. Wrote: `CONTEXT.md` (terms **Suggestion/Completion/Inquire/
-Selection-as-prompt**), `PRD.md` (Solution part 3, stories #33–#39, Inquire decisions block, Out-of-
-Scope deferred modes), `issues.md` (**Issue 2 — Inquire**, spike-first). Decision logged in
-`decisions.md` (2026-06-14).
+**Last task finished (2026-06-15):** **built Issue 2 — Inquire** (`issues.md`, all criteria `[X]`).
+Manual, whole-file, insertable-code suggestion: select lines → **OpenCode: Inquire** (right-click with
+a selection, or palette) → selection is the prompt, whole file is context → code-only ghost text
+**after** the selection (append, never replace), works even with completion disabled. Eyeball/F5
+**passed** — the spike held. Touched `src/extension.ts` (`inquire` command, `pendingInquiry`, provider
+early-return before all gates, `INQUIRE_SYSTEM_PROMPT`, `buildInquiryPrompt` + 32k size guard,
+`withProgress`, `buildContext` optional overrides) and `package.json` (command + `editor/context` menu,
+v0.0.3 → **0.0.4**). Packaged `opencode-autocomplete-0.0.4.vsix`. Decision logged in `decisions.md`.
 
-**Next task:** **build Issue 2 — Inquire** (`issues.md`). **Spike first** (step 0): confirm
-`editor.action.inlineSuggest.trigger` + a stashed pending result renders ghost text at a **collapsed
-caret after a selection** — if not, stop and revisit the surface before building. Then implement per
-Issue 2 in `src/extension.ts` + `package.json` (0.0.3 → 0.0.4); no webview change. Consider
-`/preset scope` before coding.
+**Next task:** no open slices left (Issues 1 + 2 both done). Pick one:
+- **Ship** — `/preset ship` to push branch `docs/inquire-spec` + open a PR (this commit is **not pushed**).
+- Carried-forward: faster default model, or `/tdd` for M1/M2 (+ the new `buildInquiryPrompt` slicer).
+- New work → add an `issues.md` slice first.
 
 **Landmines (see [[gotchas]] + [[active-work]]):**
-- **The spike is the one unproven assumption** — inline suggestions are keystroke-driven by default;
-  the whole feature rests on the manual trigger working. Validate it before writing the rest.
-- **Append, never replace; code only, never prose** — both alternatives were explicitly rejected
-  (data-loss / wrong-surface). Don't quietly reintroduce them.
-- Inquire must run **before** the provider's enabled/selection/debounce/cache gates and must **not**
-  touch the `lastResult` cache.
-- Reuse `stripThink`/`stripFences`/`relocateAfterComment` + the `model` setting — don't reinvent.
-- Still live: bare model ids on `zen/go/v1` (the `opencode/` prefix 401s); served models are reasoning
-  models (keep `stripThink`, `maxTokens` default `0`); key never crosses to the webview; two tsconfigs.
-- After editing, rebuild + reload window (recompile + repackage + `--force` install, or F5) — the
-  running build is otherwise stale.
+- Inquire's provider early-return must stay **before** the enabled/selection/debounce/cache gates and
+  must **not** read/write `lastResult`. Keep it **append-only, code-only** — both alternatives rejected.
+- Inline ghost text won't render while a selection is active → the command collapses the selection to
+  the caret before triggering. Don't remove that.
+- Reinstalling the **same** vsix version may not refresh — bump version + repackage + `--force` install
+  (or F5) each test iteration; reload window after.
+- Still live: bare model ids on `zen/go/v1` (the `opencode/` prefix 401s); reasoning models (keep
+  `stripThink`, `maxTokens` default `0`); key never crosses to the webview; two tsconfigs.
 
 Full rolling state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.

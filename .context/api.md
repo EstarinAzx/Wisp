@@ -1,7 +1,7 @@
 ---
 type: api
 project: opencode-autocomplete
-updated: 2026-06-10
+updated: 2026-06-15
 tags: [context, api, vscode]
 ---
 
@@ -12,6 +12,7 @@ The project's surface is a VS Code extension: an inline-completion provider, com
 ## Inline completion provider
 - Registered for all files (`{ pattern: '**' }`) via `registerInlineCompletionItemProvider` in `src/extension.ts`.
 - Behavior: debounced (cancellation-token based), gated, single-entry cached, non-streaming chat request → cleaned insertion at the caret. See [[decisions]] and [[gotchas]].
+- **Inquire** reuses this same provider as its answer surface: an early-return at the top of `provideInlineCompletionItems` (before every gate) hands back a stashed `pendingInquiry` when the caret matches, then clears it — so Inquire works even with `enabled: false` and never touches the completion cache. See the `inquire` command and [[decisions]] (2026-06-15).
 
 ## Commands
 | Command id | Title | What it does |
@@ -19,6 +20,7 @@ The project's surface is a VS Code extension: an inline-completion provider, com
 | `opencodeAutocomplete.setApiKey` | OpenCode: Set API Key | Prompt + store key in SecretStorage; invalidate cached client. |
 | `opencodeAutocomplete.listModels` | OpenCode: List / Choose Model | `GET /models` → quick-pick → write `model` setting. |
 | `opencodeAutocomplete.toggle` | OpenCode: Toggle Autocomplete | Flip `enabled`; also the status-bar click action. |
+| `opencodeAutocomplete.inquire` | OpenCode: Inquire | Selection = prompt, whole file = context → insertable code as ghost text **after** the selection (append, never replace). Cancellable `withProgress`; code-only. In the `editor/context` menu (`when: editorHasSelection`) + palette. |
 
 ## Settings (`opencodeAutocomplete.*`)
 `enabled` (bool), `baseUrl` (str, default `https://opencode.ai/zen/go/v1`, **`scope: machine`** — not workspace-overridable, blocks key-redirect), `model` (str, default **bare** `minimax-m3` — the prefixed form is rejected, see [[gotchas]]), `debounceMs` (300), `maxTokens` (64), `temperature` (0.1), `maxPrefixChars` (2000), `maxSuffixChars` (1000). No `apiKey` setting — key is SecretStorage/env only. Panel and commands write `model`/`enabled` to the scope that already defines the value (`targetFor()`), not blindly Global.
