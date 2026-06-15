@@ -1,14 +1,14 @@
 ---
 type: overview
 project: wisp
-updated: 2026-06-15
+updated: 2026-06-16
 tags: [context, overview]
 ---
 
 # Overview
 
 **Project:** wisp
-**One-liner:** **Wisp** — a VS Code extension that provides AI inline (ghost-text) completions routed through the OpenCode Zen `go` endpoint (an OpenAI-compatible API), with a Preact + Tailwind v4 side panel for managing the API key, model, and on/off toggle. **Wisp** is the product; **OpenCode Zen** is the (current, first) provider.
+**One-liner:** **Wisp** — a VS Code extension that provides AI inline (ghost-text) completions routed through a **Provider catalog** of OpenAI-compatible backends — **9 built-ins** (OpenCode Zen default · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom** — with a Preact + Tailwind v4 side panel for switching the **Active Provider** and managing its per-Provider API key, model, and on/off toggle. **Wisp** is the product; each backend is a **Provider** (OpenCode Zen is the default, first one).
 
 ## Layout
 - `src/` — extension-host (Node) TypeScript. `extension.ts` (provider, commands, shared actions) + `sidePanelProvider.ts` (the WebviewView).

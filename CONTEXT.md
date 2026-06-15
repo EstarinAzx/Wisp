@@ -20,16 +20,36 @@ reserve **Wisp** for user-facing chrome and the product-vs-**Provider** split.
 The external backend Wisp routes **Completion** and **Inquire** requests through
 — an OpenAI-compatible chat endpoint plus the credentials to reach it (base URL
 + API key). Wisp is **provider-agnostic**: a Provider is a swappable role, not a
-fixed dependency. Today there is exactly one. Providers are named **vendor +
-product line** (e.g. "OpenCode Zen", a hypothetical "Anthropic Claude"). _Avoid_:
-treating the Provider as part of the product's identity, or assuming there will
-only ever be one. (How a Provider is *reached* — the `/go` gateway, the bare-id
-rule — is an implementation detail, not part of its name; see `gotchas.md`.)
+fixed dependency. Wisp ships a **Provider catalog** of several; exactly one is the
+**Active Provider** at a time. Providers carry a **canonical vendor name** (e.g.
+"OpenCode Zen", "Groq", "Mistral", "KiloCode"). _Avoid_: treating the Provider as
+part of the product's identity, or assuming there is only one. (How a Provider is
+*reached* — the `/go` gateway, the bare-id rule — is an implementation detail, not
+part of its name; see `gotchas.md`.)
+
+**Active Provider**:
+The one **Provider** currently selected; all **Completion** and **Inquire**
+requests route through it. Exactly one is Active at a time. Switching the Active
+Provider re-scopes which API key and which model are in effect — each Provider
+remembers its own. _Avoid_: implying several Providers serve requests at once.
+
+**Provider catalog**:
+The set of **built-in Providers** Wisp ships ready-made — each a canonical name
+paired with its base URL, default model, and API-key environment variable.
+Curated, not exhaustive; **OpenCode Zen** is the default and first entry. _Avoid_:
+treating the catalog as the limit — a **Custom Provider** reaches anything else.
+
+**Built-in Provider** / **Custom Provider**:
+A **built-in Provider** is a catalog preset whose base URL is fixed in code (the
+user supplies only a key and picks a model). A **Custom Provider** is the escape
+hatch: the user supplies base URL and model themselves, for any OpenAI-compatible
+endpoint not in the catalog. _Avoid_: exposing a built-in's base URL as
+user-editable — it is fixed on purpose (a security property; see `gotchas.md`).
 
 **OpenCode Zen**:
-The current, first, and only **Provider** — the OpenAI-compatible chat endpoint
-at `https://opencode.ai/zen/go/v1`, with the `OPENCODE_API_KEY` environment-
-variable fallback. Canonically **"OpenCode Zen"** (vendor *OpenCode* + product
+The **default** Provider and first catalog entry — the OpenAI-compatible chat
+endpoint at `https://opencode.ai/zen/go/v1`, with the `OPENCODE_API_KEY`
+environment-variable fallback. Canonically **"OpenCode Zen"** (vendor *OpenCode* + product
 *Zen*) — never bare "OpenCode" or "Zen". The product *has* a Provider; the
 Provider keeps its own name. _Avoid_: calling the product "OpenCode".
 

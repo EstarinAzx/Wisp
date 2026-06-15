@@ -59,6 +59,28 @@ fails safe — when unsure it returns the suggestion unchanged and never drops c
 ### Packaging ships node_modules — bundling is optional (size only)
 **Empirically verified:** `vsce package` includes production `dependencies`, so `node_modules/openai` is inside the `.vsix` and the extension runs installed without esbuild/webpack. (The earlier claim that it "won't ship without bundling" was wrong.) Bundling remains worth doing later to shrink the package — the unbundled `.vsix` is ~1402 files / 2.33 MB and vsce warns about it — but it is not a correctness blocker.
 
+### Ollama Cloud base URL is `/v1`, NOT `/api/v1`
+Ollama Cloud (`ollama.com`, the **hosted** service — distinct from local `localhost:11434`) is
+OpenAI-compatible at `https://ollama.com/v1`. The `/api` prefix (`/api/chat`, `/api/tags`) is Ollama's
+**native** protocol and breaks the OpenAI SDK. Use `/v1` for the catalog row; key env var
+`OLLAMA_API_KEY` (Bearer). Local Ollama needs no key. Verified 2026-06-15 (multi-provider research).
+
+### The Provider selector is a key-redirect vector — keep `wisp.provider` machine-scoped
+`wisp.provider` selects which base URL the bearer API key is sent to, so it carries the exact threat
+`wisp.baseUrl` does: a workspace-overridable selector lets a hostile repo redirect the key to an
+attacker endpoint. `wisp.provider` MUST stay `"scope": "machine"`, and built-in base URLs MUST live in
+code (the `PROVIDERS` catalog), never in settings. Custom's `wisp.baseUrl` is the only user-supplied
+URL, also machine-scoped. Don't relax either without re-reading the 2026-06-15 multi-provider ADR.
+
+### Cline ToS, and why Copilot/Cursor were dropped
+Cline's ToS §2.2 bars use "to develop competing products… or otherwise to our detriment." Ship the Cline
+Provider **user-supplied-key only** (never an embedded/shared/proxied key) + a one-line in-panel note
+that the user owns their ToS compliance. **GitHub Copilot** and **Cursor** were dropped entirely —
+Copilot's only path is reverse-engineered client impersonation (account-ban risk); Cursor's API is
+shape-incompatible (no `/chat/completions`) and "auth-only" use means session-token piggybacking (ToS
+violation). Don't re-add them as "OAuth providers" — OAuth doesn't fix *why* they fail. See the
+2026-06-15 ADR.
+
 ## Related
 - [[api]]
 - [[decisions]]

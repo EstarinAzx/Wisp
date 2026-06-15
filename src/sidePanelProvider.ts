@@ -7,12 +7,13 @@
  *   - crypto (node): nonce generation for the CSP script-src.
  *
  * Data shapes:
- *   - PanelState: { keyIsSet, model, enabled, baseUrl } — everything the panel may know.
- *     The API key value itself never crosses the webview boundary, only the keyIsSet boolean.
+ *   - PanelState: { keyIsSet, keySource, keyEnv, model, enabled, baseUrl, providerId, providers,
+ *     isCustom } — everything the panel may know. The API key value itself never crosses the
+ *     webview boundary, only the keyIsSet boolean.
  *   - PanelHost: the shared action helpers injected from extension.ts (store/clear key, fetch
- *     model ids, set model/enabled, read state + Activity) — injection avoids a circular import.
+ *     model ids, set model/enabled/provider/baseUrl, read state + Activity) — avoids a circular import.
  *   - Webview → ext messages: ready | setApiKey{value} | clearApiKey | selectModel{value}
- *     | setEnabled{value} | refreshModels.
+ *     | selectProvider{value} | setBaseUrl{value} | setEnabled{value} | refreshModels.
  *   - Ext → webview messages: state{state} | models{ids} | modelsError{message} | activity{thinking}.
  */
 
@@ -24,9 +25,13 @@ import { randomBytes } from 'crypto';
 export type PanelState = {
   keyIsSet: boolean;
   keySource: 'stored' | 'env' | 'none';
+  keyEnv: string; // active Provider's env-var name, so the env hint names the right var ('' = none)
   model: string;
   enabled: boolean;
   baseUrl: string;
+  providerId?: string; // Active Provider id (drives the dropdown's selected value)
+  providers: { id: string; label: string }[]; // the catalog, for the dropdown
+  isCustom: boolean; // active Provider is Custom → the panel reveals the editable base-URL field (Issue 7)
 };
 
 // Shared with extension.ts so the no-key failure is recognizable as webview-safe text.
@@ -40,6 +45,8 @@ export type PanelHost = {
   fetchModelIds: () => Promise<string[]>;
   setModel: (id: string) => Promise<void>;
   setEnabled: (value: boolean) => Promise<void>;
+  setProvider: (id: string) => Promise<void>;
+  setBaseUrl: (url: string) => Promise<void>;
 };
 
 // ----------------------------- Error sanitizing ----------------------------- //
@@ -111,6 +118,12 @@ export class WispPanelProvider implements vscode.WebviewViewProvider {
           return;
         case 'selectModel':
           if (typeof msg.value === 'string' && msg.value.trim()) await this.host.setModel(msg.value.trim());
+          return;
+        case 'selectProvider':
+          if (typeof msg.value === 'string' && msg.value.trim()) await this.host.setProvider(msg.value.trim());
+          return;
+        case 'setBaseUrl':
+          if (typeof msg.value === 'string' && msg.value.trim()) await this.host.setBaseUrl(msg.value.trim());
           return;
         case 'setEnabled':
           await this.host.setEnabled(!!msg.value);
