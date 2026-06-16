@@ -1,66 +1,68 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-16
+updated: 2026-06-17
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-16 by Opus 4.8 (auto)_
-_On `main` @ `bdcf780` (PR #2 merge). Backlog item 3 shipped; `test/pure-helpers` + `feat/multi-provider-catalog` merged and pruned._
+_Last updated: 2026-06-17 by Opus 4.8 (auto)_
+_At commit: `79845b8` on branch `feat/inline-chat-pivot`_
 
 ## Current focus
-**Pure helpers extracted and unit-tested (backlog item 3 — DONE).** The vscode-coupled resolvers were
-pulled into a new vscode-free module and put under test with Vitest — the project's first test runner.
-Next session is **user-led**: they want to discuss a **new scope addition** (TBD — they bring it).
+**Scope pivot, fully planned — not yet implemented.** Wisp is dropping **Completion**
+(the always-on, enabled-gated ghost-text autocomplete) and evolving **Inquire** into a
+VS Code inline-chat-style **editor**: type an instruction in a quick input box → AI rewrites
+the target span (add **and** delete) → accept/reject diff. Same Provider catalog, client, keys,
+side panel. PRD + tracer-slice issues are filed; next session starts coding slice 1 (#4).
 
 ## State
-- **In flight:** nothing.
-- **Done this session:**
-  - New `src/catalog.ts` (imports nothing — deliberately vscode-free): `resolveModel`,
-    `resolveBaseUrl`, `buildInquiryContent` (reshaped to take `{ text, languageId, offset }`, not a
-    `vscode.TextDocument`), and `planLegacyMigration` (a pure plan the applier executes).
-  - New `src/catalog.test.ts` — **13 Vitest tests**, all green (limit boundary, windowing bounds,
-    migration idempotency, empty-string-model fallback).
-  - `src/extension.ts` rewired: thin wrappers delegate to the pure cores, behaviour-identical. Dropped
-    now-unused `buildContext` prefix/suffix params (orphaned by the inquiry change).
-  - **Verified ollama-cloud** `gpt-oss:120b` works → dropped its ⚠ in `PROVIDERS` (user-confirmed).
-  - Tooling: `+vitest` devDep, `test: vitest run` script, `tsconfig.json` excludes `src/**/*.test.ts`
-    from the extension build.
-  - **Verification:** `npm test` 13/13 green; `npm run compile` clean (extension + webview + vite).
-    NOT F5/eyeball-tested (behaviour-identical refactor; user said land it).
+- **In flight:** nothing coded yet. Branch `feat/inline-chat-pivot` holds only the design spec.
+- **Done this session (planning only):**
+  - Brainstormed the pivot; wrote + committed the design spec
+    `docs/superpowers/specs/2026-06-17-inline-chat-pivot-design.md` (`5039917`, reframed `79845b8`).
+  - Filed GitHub issues: **PRD #3** (parent) + 4 tracer slices — **#4** evolve Inquire→inline-edit (B1),
+    **#5** remove Completion, **#6** inline diff (B2), **#7** bonus LM-provider (deferred/HITL).
+  - Research settled the API path (see [[decisions]]): native Ctrl+I widget is proposed-API →
+    unpublishable; build our own on stable APIs (`showInputBox` + `WorkspaceEdit` + refactor-preview,
+    later decorations + CodeLens).
 - **Blocked:** nothing.
 
 ## Pick up here
-**Primary (user-led): discuss the new scope addition** the user is bringing — undefined as of this
-handoff. Start with `superpowers:brainstorming`; if it firms up, `/preset init` or `to-prd`/`to-issues`.
+**Implement slice 1 — issue #4 (evolve Inquire → inline-edit, B1).** `gh issue view 4 --comments`.
+- TDD the pure cores into `src/catalog.ts` (project pattern): `buildEditPrompt`, `extractEditText`
+  (composes existing `stripThink`/`stripFences`). Add cases to `src/catalog.test.ts`. `npm test`.
+- In `src/extension.ts`, rewire `wisp.inquire`: `showInputBox` for the instruction; selection (or
+  current line) = target span; whole file = context; apply a `WorkspaceEdit` replace with
+  `needsConfirmation: true` → native refactor-preview accept/reject.
+- **Inquire must stop using `pendingInquiry` and the inline-completion provider** — that decoupling is
+  the whole point of doing #4 before #5. Completion stays running this slice.
+- Add a rebindable `Ctrl+Shift+I` keybinding (Ctrl+I is taken by built-in Copilot inline chat, VS 1.116).
+- Verify: `npm test` green, `npm run compile` clean, F5 (select → instruction → preview → accept/reject).
 
-Remaining backlog (lower priority, carried forward):
-1. **Verify the 3 still-⚠ `defaultModel`s** once keys exist — `ollama` (`qwen2.5-coder`), `kilocode` +
-   `cline` (`anthropic/claude-3.5-sonnet`). Fix in `PROVIDERS` (`src/extension.ts`). (ollama-cloud now
-   verified, dropped from this list.)
-2. **README** — document `wisp.provider`, the Provider catalog, reworded `wisp.baseUrl` ("Custom only").
-
-Carried-forward: try a snappier default Zen model (`deepseek-v4-flash` / `kimi-k2.6`).
+Slices #5/#6 are blocked by #4. #7 is deferred (HITL gating check first).
 
 ## Skills for next session
-- `superpowers:brainstorming` — for the new scope addition the user brings.
-- `superpowers:test-driven-development` — the Vitest harness now exists (`npm test`); TDD any new pure logic into `src/catalog.ts`.
+- `superpowers:test-driven-development` — the Vitest harness exists; TDD the new pure cores into `catalog.ts`.
+- `superpowers:executing-plans` — implementing the filed slice issues in order.
 
 ## Open questions
-- **The new scope addition is undefined** — the user defines it next session.
-- The 3 remaining ⚠ model ids stay unverified until keys exist (non-blocking).
+- **Slice #7 (Option A) gating** — BYOK / LM-chat-provider may need Copilot Business/Enterprise (Apr 2026)
+  vs VS Code docs saying it works without a Copilot plan. Resolve before building #7 (non-blocking for #4–#6).
 
 ## Recent context
-- `test/pure-helpers` (PR #2) and `feat/multi-provider-catalog` (PR #1) both merged to `main` and pruned (local + remote).
-- **Pattern established:** pure, unit-testable logic lives vscode-free in `src/catalog.ts`; `extension.ts`
-  reads VS Code state and delegates. Tests can't import `extension.ts` (it imports `vscode`). See [[gotchas]].
-- **No model-id transform anywhere** — each row's `defaultModel` is the Provider's native form; never
-  re-add the `opencode/` prefix (it 401s Zen).
+- The pivot is **remove Completion, evolve Inquire** in `CONTEXT.md` vocabulary — not a greenfield feature.
+- **Slice order is forced by code:** Inquire today has no surface of its own — it stashes `pendingInquiry`
+  that the Completion `InlineCompletionItemProvider` returns via an early-return. So evolve Inquire (#4)
+  before ripping the provider (#5), or #4 breaks.
+- Prompt entry is a top-center `showInputBox`, NOT a floating in-editor widget — that native widget is a
+  proposed API and unpublishable. The edit + diff are in-editor; that part matches the native feel.
+- `CONTEXT.md` will need updating in #5 (retire Completion/Suggestion/enabled/Muted/selection-as-prompt,
+  redefine Inquire). Stale note fixed this session: the repo IS git with remote `EstarinAzx/BYOK-IDE-Auto-Complete`.
 
 ## Related
 - [[overview]]
-- [[api]]
-- [[decisions]]
-- [[gotchas]]
+- [[api]] — Inquire/Completion wiring being changed
+- [[decisions]] — the pivot decision + API-path research
+- [[gotchas]] — `pendingInquiry` entanglement, two tsconfigs, bare model-id

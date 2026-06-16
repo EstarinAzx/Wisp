@@ -1,7 +1,7 @@
 ---
 type: pick-up
 project: wisp
-updated: 2026-06-16
+updated: 2026-06-17
 tags: [context, pick-up]
 ---
 
@@ -9,30 +9,33 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate the project.
 
-**Last task finished (2026-06-16):** **TDD'd the pure helpers (backlog item 3).** Extracted the
-vscode-coupled resolvers into a new **vscode-free `src/catalog.ts`** (`resolveModel`, `resolveBaseUrl`,
-`buildInquiryContent`, `planLegacyMigration`) and put them under **13 Vitest tests** (`src/catalog.test.ts`)
-— the project's first test runner. `extension.ts` wrappers now delegate, behaviour-identical. Also
-**verified ollama-cloud** (`gpt-oss:120b`) and dropped its ⚠. `npm test` 13/13 green, `npm run compile`
-clean. **Merged to `main`** via PR #2 (merge commit `bdcf780`); branch pruned. You're on `main`, clean.
+**Last session (2026-06-17) — planning only, no code.** Shaped + locked the **scope pivot**:
+deprecate **Completion** (always-on, `enabled`-gated ghost-text autocomplete) and evolve **Inquire**
+into a VS Code inline-chat-style **editor** (instruction in a quick input box → AI rewrites the target
+span, add **and** delete → accept/reject diff). Reuses the Provider catalog, client, keys, side panel.
+Wrote + committed the **design spec** (`docs/superpowers/specs/2026-06-17-inline-chat-pivot-design.md`)
+and filed GitHub issues: **PRD #3** + slices **#4** (evolve Inquire B1) · **#5** (remove Completion) ·
+**#6** (inline diff B2) · **#7** (bonus LM-provider, deferred/HITL). On branch `feat/inline-chat-pivot`,
+commit `79845b8` (+ this `.context` update). Nothing coded.
 
-**Next task: USER-LED — discuss a new scope addition.** The user said they'll bring a **new addition to
-the scope** next session; it is undefined here. Start with `superpowers:brainstorming` to shape it; if it
-firms up into work, `/preset init` or `to-prd`/`to-issues`. Don't assume what it is — let the user define it.
+**Next task: implement slice 1 — issue #4.** `gh issue view 4 --comments`. Plan:
+1. TDD pure cores into `src/catalog.ts` (`buildEditPrompt`, `extractEditText` composing existing
+   `stripThink`/`stripFences`); add cases to `src/catalog.test.ts`; `npm test`.
+2. Rewire `wisp.inquire` in `src/extension.ts`: `showInputBox` instruction; selection (or current line)
+   = target span; whole file = context; `WorkspaceEdit` replace with `needsConfirmation: true` → native
+   refactor-preview accept/reject. Add rebindable `Ctrl+Shift+I` keybinding.
+3. Verify: `npm test` green, `npm run compile` clean, F5 eyeball.
 
-Carried-forward backlog (only if the user wants it instead):
-- Verify the **3 still-⚠** `defaultModel`s once keys exist — `ollama` (`qwen2.5-coder`), `kilocode` +
-  `cline` (`anthropic/claude-3.5-sonnet`). Fix in `PROVIDERS` (`src/extension.ts`).
-- **README** — document `wisp.provider`, the catalog, reworded `wisp.baseUrl` ("Custom only").
+**Landmines:**
+- **Do #4 before #5.** Inquire today has no surface of its own — it stashes `pendingInquiry` that the
+  Completion `InlineCompletionItemProvider` returns via an early-return. Give Inquire its own edit path
+  first; ripping the provider before that breaks Inquire. (See [[decisions]] 2026-06-17, [[api]] line 15.)
+- **Keep pure logic vscode-free in `catalog.ts`** (the testable pattern); `extension.ts` imports `vscode`
+  so tests can't import it. Don't fold new logic inline.
+- **No model-id transform** — each Provider's `defaultModel` is its native form (re-adding `opencode/` 401s Zen).
+- Prompt entry is `showInputBox` (top-center), NOT a floating in-editor widget — that's a proposed,
+  unpublishable API. Edit + diff are in-editor; that part matches the native feel.
+- `Ctrl+I` is taken by built-in Copilot inline chat (VS 1.116) — use `Ctrl+Shift+I`, rebindable.
 
-**Landmines (see [[gotchas]] + [[active-work]]):**
-- **Keep pure logic in `catalog.ts` (vscode-free).** `extension.ts` imports `vscode`, so tests can't
-  import it — new testable logic goes in `catalog.ts` and is TDD'd via `npm test`. Don't fold it back inline.
-- **No model-id transform** — each row's `defaultModel` is the Provider's native form; never re-add the
-  `opencode/` prefix (it 401s Zen).
-- Built-in base URLs are hardcoded in `PROVIDERS` (code), never settings; `wisp.provider` + `wisp.baseUrl`
-  are `"scope": "machine"` — the key-redirect defense. Don't relax.
-- `wisp.model` is a **mirror**; source of truth is `globalState['wisp.models']` per-Provider map.
-- `catalog.ts` is on `main` now; `test/pure-helpers` (PR #2) + `feat/multi-provider-catalog` (PR #1) both merged and pruned (local + remote).
-
-Full rolling state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.
+Full rolling state in [[active-work]]; pivot rationale + API-path research in [[decisions]]; domain
+language in `CONTEXT.md` (will be updated in #5).
