@@ -11,7 +11,7 @@ tags: [context, overview]
 **One-liner:** **Wisp** — a VS Code extension that provides AI inline (ghost-text) completions routed through a **Provider catalog** of OpenAI-compatible backends — **9 built-ins** (OpenCode Zen default · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom** — with a Preact + Tailwind v4 side panel for switching the **Active Provider** and managing its per-Provider API key, model, and on/off toggle. **Wisp** is the product; each backend is a **Provider** (OpenCode Zen is the default, first one).
 
 ## Layout
-- `src/` — extension-host (Node) TypeScript. `extension.ts` (provider, commands, shared actions) + `sidePanelProvider.ts` (the WebviewView).
+- `src/` — extension-host (Node) TypeScript. `extension.ts` (provider, commands, shared actions) + `sidePanelProvider.ts` (the WebviewView) + `catalog.ts` (vscode-free pure Provider-catalog data + resolvers; the only unit-tested module, `catalog.test.ts`).
 - `webview/` — Preact + Tailwind v4 side-panel UI (own tsconfig), bundled separately by Vite.
 - `media/` — activity-bar icon SVG.
 - `.vscode/` — `launch.json` (F5 → Extension Development Host) + `tasks.json` (build).
@@ -25,6 +25,7 @@ tags: [context, overview]
 ## How to run
 - Install: `npm install`
 - Build: `npm run compile` (`tsc -p ./ && tsc -p webview && vite build`).
+- Test: `npm test` (Vitest — pure-logic unit tests in `src/*.test.ts`; no Electron host).
 - Dev: press **F5** in VS Code → Extension Development Host (the Wisp icon is in *that* window's activity bar).
 - Package: `npx @vscode/vsce package --allow-missing-repository --skip-license` → installable `.vsix`.
 - Set key: the **Wisp side panel** (activity-bar icon), command **Wisp: Set API Key**, or env `OPENCODE_API_KEY`.

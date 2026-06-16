@@ -1,7 +1,7 @@
 ---
 type: gotchas
 project: wisp
-updated: 2026-06-15
+updated: 2026-06-16
 tags: [context, gotchas]
 ---
 
@@ -80,6 +80,16 @@ Copilot's only path is reverse-engineered client impersonation (account-ban risk
 shape-incompatible (no `/chat/completions`) and "auth-only" use means session-token piggybacking (ToS
 violation). Don't re-add them as "OAuth providers" — OAuth doesn't fix *why* they fail. See the
 2026-06-15 ADR.
+
+### Unit-testable logic must live vscode-free in `catalog.ts`, not in `extension.ts`
+`extension.ts` imports `vscode` (and `openai`) at the top, so a plain Vitest/Node test can't import it —
+there's no Extension Development Host outside VS Code, so the import throws. Pure, unit-testable logic
+therefore lives in `src/catalog.ts`, which **imports nothing**: `resolveModel`, `resolveBaseUrl`,
+`buildInquiryContent` (takes `{ text, languageId, offset }`, not a `vscode.TextDocument`), and
+`planLegacyMigration` (the migration's decision as a pure plan; `extension.ts` applies it). The
+`extension.ts` wrappers read VS Code state and delegate. Don't fold this logic back inline "to keep it
+together" — it becomes untestable. Tests are kept out of the extension build via `tsconfig` `exclude:
+["src/**/*.test.ts"]`. Run `npm test`. See [[decisions]].
 
 ## Related
 - [[api]]
