@@ -1,7 +1,7 @@
 ---
 type: stack
 project: wisp
-updated: 2026-06-15
+updated: 2026-06-16
 tags: [context, stack]
 ---
 
@@ -25,6 +25,9 @@ tags: [context, stack]
   - `tsc -p webview` — **type-checks only** (`noEmit`); Vite's esbuild transform skips type-checking, so this step is what catches webview type errors.
   - `vite build` → `dist/webview/`. Webview is on a **separate tsconfig** (`jsx: react-jsx`, `jsxImportSource: preact`, DOM libs) so the extension compiler never sees browser JSX.
 - Package: `npx @vscode/vsce package --allow-missing-repository --skip-license` → `.vsix` (runs `compile` via `vscode:prepublish`). Dev sources excluded by `.vscodeignore`.
+
+## Testing
+- `vitest` `^4.1` (dev-only) — unit-test runner for the **vscode-free** pure logic in `src/catalog.ts` (`src/*.test.ts`). Run `npm test` (`vitest run`). No `@vscode/test-electron`: the tested functions are pure, so no Extension Development Host is needed. `tsconfig.json` excludes `src/**/*.test.ts` from the extension build so tests never ship in `out/`.
 
 ## Services
 - None (no DB/cache). Single external HTTP dependency: the OpenCode Zen provider — see [[api]].

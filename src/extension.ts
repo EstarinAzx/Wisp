@@ -25,6 +25,9 @@
 import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvider';
+import {
+  Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, buildInquiryContent, planLegacyMigration,
+} from './catalog';
 
 // ----------------------------- Constants ----------------------------- //
 
@@ -61,10 +64,6 @@ const INQUIRE_SYSTEM_PROMPT =
   'Match the file’s existing indentation and style. ' +
   'Return an empty string if there is nothing to add.';
 
-// Above this many characters, sending the whole file risks overflowing the model context window,
-// so Inquire falls back to a large window around the selection instead.
-const INQUIRE_CONTEXT_LIMIT = 32000;
-
 // ----------------------------- Provider catalog ----------------------------- //
 
 // A Provider is one OpenAI-chat-compatible backend, reached by swapping {baseUrl, key, model} on the
@@ -75,18 +74,10 @@ const INQUIRE_CONTEXT_LIMIT = 32000;
 // defaultModel is in the Provider's native form (re-adding Zen's `opencode/` prefix 401s the /go
 // endpoint, which wants the bare id /models serves). GitHub Copilot and Cursor are deliberately
 // absent (ban risk / shape-incompatible — see the 2026-06-15 multi-provider ADR + gotchas).
-type Provider = {
-  id: string;            // stable id; also the key-slot + globalState model-map suffix
-  label: string;         // canonical vendor name (panel/UI, never the status bar)
-  baseUrl: string;       // hardcoded OpenAI-compatible base URL
-  defaultModel: string;  // native-format model id used when the Provider has none remembered
-  apiKeyEnv: string;     // env-var fallback for the key ('' = none, e.g. local Ollama)
-};
-
-// defaultModel for the first five is doc-verified; the four marked ⚠ are BEST-EFFORT presets — no
-// key was available to verify them against each GET /models, so the panel's model picker / type-field
-// is the correction path. ⚠ Ollama Cloud is `/v1`, NOT `/api/v1` (the `/api` prefix is Ollama's
-// native protocol and breaks the OpenAI SDK — see gotchas.md).
+// defaultModel for the first five is doc-verified and ollama-cloud is user-verified (2026-06-16); the
+// three still marked ⚠ are BEST-EFFORT presets — no key was available to verify them against each GET
+// /models, so the panel's model picker / type-field is the correction path. ⚠ Ollama Cloud is `/v1`,
+// NOT `/api/v1` (the `/api` prefix is Ollama's native protocol and breaks the OpenAI SDK — see gotchas.md).
 const PROVIDERS: Provider[] = [
   { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/go/v1', defaultModel: 'minimax-m3', apiKeyEnv: 'OPENCODE_API_KEY' },
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY' },
@@ -94,7 +85,7 @@ const PROVIDERS: Provider[] = [
   { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', defaultModel: 'codestral-latest', apiKeyEnv: 'MISTRAL_API_KEY' },
   { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o-mini', apiKeyEnv: 'OPENROUTER_API_KEY' },
   { id: 'ollama', label: 'Ollama (local)', baseUrl: 'http://localhost:11434/v1', defaultModel: 'qwen2.5-coder' /* ⚠ best-effort: user must have pulled it */, apiKeyEnv: '' },
-  { id: 'ollama-cloud', label: 'Ollama Cloud', baseUrl: 'https://ollama.com/v1', defaultModel: 'gpt-oss:120b' /* ⚠ best-effort cloud tag */, apiKeyEnv: 'OLLAMA_API_KEY' },
+  { id: 'ollama-cloud', label: 'Ollama Cloud', baseUrl: 'https://ollama.com/v1', defaultModel: 'gpt-oss:120b' /* verified working 2026-06-16 */, apiKeyEnv: 'OLLAMA_API_KEY' },
   { id: 'kilocode', label: 'KiloCode', baseUrl: 'https://api.kilo.ai/api/gateway', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify namespace via /models */, apiKeyEnv: 'KILOCODE_API_KEY' },
   { id: 'cline', label: 'Cline', baseUrl: 'https://api.cline.bot/api/v1', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify via /models */, apiKeyEnv: 'CLINE_API_KEY' },
   // Custom: the always-works escape hatch and the only Provider whose base URL + model are
@@ -105,10 +96,6 @@ const PROVIDERS: Provider[] = [
 
 // globalState key for the per-Provider model memory: { providerId: model }.
 const MODEL_MAP_KEY = 'wisp.models';
-
-// The Custom Provider's id — the one Provider whose base URL is user-supplied (machine-scoped
-// wisp.baseUrl) rather than hardcoded in the catalog.
-const CUSTOM_ID = 'custom';
 
 // ----------------------------- Module state ----------------------------- //
 
@@ -151,18 +138,12 @@ const keySlot = (id: string): string => `${SECRET_KEY}.${id}`;
 
 // Active model: the Provider's remembered model (globalState) else its native default. Each Provider
 // keeps its own model — one global id is wrong across Providers (Zen minimax-m3 vs Groq llama-…).
-const activeModel = (): string => {
-  const map = globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {};
-  const p = activeProvider();
-  return map[p.id] || p.defaultModel;
-};
+const activeModel = (): string =>
+  resolveModel(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}, activeProvider());
 
 // Base URL for the Active Provider. Built-ins use their hardcoded catalog URL; only Custom reads the
 // user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
-const activeBaseUrl = (): string => {
-  const p = activeProvider();
-  return p.id === CUSTOM_ID ? cfg().get<string>('baseUrl') ?? '' : p.baseUrl;
-};
+const activeBaseUrl = (): string => resolveBaseUrl(activeProvider(), cfg().get<string>('baseUrl') ?? '');
 
 // Key resolution for the Active Provider: its namespaced SecretStorage slot first, then the row's own
 // env var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings.
@@ -190,11 +171,9 @@ const getClient = async (): Promise<OpenAI | undefined> => {
 const buildContext = (
   doc: vscode.TextDocument,
   pos: vscode.Position,
-  maxPrefixChars?: number,
-  maxSuffixChars?: number,
 ): { prefix: string; suffix: string } => {
-  const maxPrefix = maxPrefixChars ?? cfg().get<number>('maxPrefixChars') ?? 2000;
-  const maxSuffix = maxSuffixChars ?? cfg().get<number>('maxSuffixChars') ?? 1000;
+  const maxPrefix = cfg().get<number>('maxPrefixChars') ?? 2000;
+  const maxSuffix = cfg().get<number>('maxSuffixChars') ?? 1000;
   const full = doc.getText();
   const offset = doc.offsetAt(pos);
   return {
@@ -206,25 +185,17 @@ const buildContext = (
 const buildUserPrompt = (languageId: string, prefix: string, suffix: string): string =>
   `Language: ${languageId}\n\n${prefix}<CURSOR>${suffix}`;
 
-// Inquire's user message: the whole file plus the selection marked as the instruction. Over
-// INQUIRE_CONTEXT_LIMIT the whole file is swapped for a large window around the selection (reusing
-// buildContext) so a big file degrades to nearby context instead of overflowing the model.
+// Inquire's user message. Reads the file text + caret offset off the VS Code document, then hands
+// the pure builder the whole-file-vs-windowed slicing decision — see buildInquiryContent in catalog.
 const buildInquiryPrompt = (
   document: vscode.TextDocument,
   caret: vscode.Position,
   selectionText: string,
-): { content: string; truncated: boolean } => {
-  const header = `The user selected these lines as an instruction:\n${selectionText}`;
-  const full = document.getText();
-  if (full.length <= INQUIRE_CONTEXT_LIMIT) {
-    return { content: `Language: ${document.languageId}\n\nFull file:\n${full}\n\n${header}`, truncated: false };
-  }
-  const { prefix, suffix } = buildContext(document, caret, 24000, 6000);
-  return {
-    content: `Language: ${document.languageId}\n\nFile excerpt around the selection:\n${prefix}<CURSOR>${suffix}\n\n${header}`,
-    truncated: true,
-  };
-};
+): { content: string; truncated: boolean } =>
+  buildInquiryContent(
+    { text: document.getText(), languageId: document.languageId, offset: document.offsetAt(caret) },
+    selectionText,
+  );
 
 // Reasoning models (e.g. minimax-m3) emit their chain-of-thought inline as a <think>…</think>
 // block before the real completion — strip it so the ghost text is the answer, not the thinking.
@@ -539,18 +510,20 @@ const getState = async (): Promise<PanelState> => {
 // ----------------------------- Migration ----------------------------- //
 
 // One-time, silent: the pre-catalog key lived in the bare `wisp.apiKey` slot with the model in
-// `wisp.model`. Zen was the only Provider that existed then, so that key is provably the Zen key —
-// copy it into Zen's namespaced slot + globalState model record, then delete the legacy slot. No-op
-// the moment the Zen slot exists, so it runs at most once and can never lose a key.
+// `wisp.model`. Zen was the only Provider that existed then, so that key is provably the Zen key.
+// planLegacyMigration() owns the idempotency + correctness logic (no-op once the Zen slot exists, so
+// it runs at most once and can never lose a key); here we read the storage state and apply its plan.
 const migrateLegacyKey = async (): Promise<void> => {
   const zenSlot = keySlot('opencode-zen');
-  if (await secrets.get(zenSlot)) return;
-  const legacy = await secrets.get(SECRET_KEY);
-  if (!legacy) return;
-  await secrets.store(zenSlot, legacy);
-  const legacyModel = cfg().get<string>('model');
-  if (legacyModel) {
-    await globalState.update(MODEL_MAP_KEY, { ...(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}), 'opencode-zen': legacyModel });
+  const plan = planLegacyMigration({
+    zenKeyPresent: !!(await secrets.get(zenSlot)),
+    legacyKey: await secrets.get(SECRET_KEY),
+    legacyModel: cfg().get<string>('model'),
+  });
+  if (!plan) return;
+  await secrets.store(zenSlot, plan.storeZenKey);
+  if (plan.setModel) {
+    await globalState.update(MODEL_MAP_KEY, { ...(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}), 'opencode-zen': plan.setModel });
   }
   await secrets.delete(SECRET_KEY);
 };

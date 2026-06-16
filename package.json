@@ -132,7 +132,8 @@
     "compile": "tsc -p ./ && tsc -p webview && vite build",
     "watch": "tsc -watch -p ./",
     "build:webview": "vite build",
-    "watch:webview": "vite build --watch"
+    "watch:webview": "vite build --watch",
+    "test": "vitest run"
   },
   "dependencies": {
     "openai": "^4.80.0"
@@ -145,6 +146,7 @@
     "preact": "^10.26.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.4.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^4.1.9"
   }
 }
