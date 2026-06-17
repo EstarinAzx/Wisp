@@ -268,11 +268,12 @@ describe('buildChatModelInfos', () => {
   });
 
   // Context follows the ACTIVE model id via the lookup table — switch a Provider to a known model and
-  // its window updates (here Zen serving a 200K Claude despite its 'minimax-m3' default).
+  // its window updates (here Zen serving a 200K Claude despite its 'minimax-m3' default). The window is
+  // DECOMPOSED into input+output (VS Code sums them for display), so the pair totals the real context.
   it('sizes context from the active model via the lookup', () => {
     const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
     const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: { 'opencode-zen': 'claude-sonnet-4' }, customBaseUrl: '' });
-    expect(info.maxInputTokens).toBe(200_000);
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(200_000);
     expect(info.maxOutputTokens).toBe(8_192);
   });
 
@@ -280,7 +281,7 @@ describe('buildChatModelInfos', () => {
   it('falls back to default caps for an unknown model', () => {
     const p = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'mystery-x' });
     const [info] = buildChatModelInfos([p], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '' });
-    expect(info.maxInputTokens).toBe(128_000);
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(128_000);
     expect(info.maxOutputTokens).toBe(4_096);
   });
 
@@ -290,9 +291,20 @@ describe('buildChatModelInfos', () => {
     const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
     const caps = () => ({ contextInput: 512_000, maxOutput: 131_072, vision: true });
     const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps });
-    expect(info.maxInputTokens).toBe(512_000);
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(512_000);
     expect(info.maxOutputTokens).toBe(131_072);
     expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+
+  // An anomalous "output == context" entry (real: kimi-k2.7-code, ctx=out=262144) must not zero the
+  // input budget — output is capped at half the window so the pair still totals the real context.
+  it('caps output at half the window when output equals context', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'kimi' });
+    const caps = () => ({ contextInput: 262_144, maxOutput: 262_144, vision: true });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps });
+    expect(info.maxInputTokens).toBe(131_072);
+    expect(info.maxOutputTokens).toBe(131_072);
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(262_144);
   });
 
   // When caps are unavailable (model absent from models.dev / fetch failed) it degrades to today's
@@ -300,7 +312,7 @@ describe('buildChatModelInfos', () => {
   it('falls back to table/default when caps return undefined', () => {
     const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
     const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps: () => undefined });
-    expect(info.maxInputTokens).toBe(128_000);
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(128_000);
     expect(info.capabilities).toEqual({ toolCalling: true });
   });
 

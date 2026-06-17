@@ -300,16 +300,23 @@ export const buildChatModelInfos = (
     // Custom has no hardcoded URL — without wisp.baseUrl there is nowhere to send the request.
     const reachable = p.id !== CUSTOM_ID || state.customBaseUrl.trim() !== '';
     if (!state.keyed[p.id] || !model || !reachable) return [];
-    // Each field: dynamic models.dev caps -> hardcoded table -> conservative default.
+    // Each field: dynamic models.dev caps -> hardcoded table -> conservative default. contextInput is
+    // the TOTAL context window (models.dev limit.context). VS Code's "Context Size" column SUMS
+    // maxInput+maxOutput, so decompose the window: reserve the output budget, leave the rest for input
+    // (output capped at half the window so an anomalous "output == context" can't zero the input).
     const dyn = state.caps?.(p, model);
     const ctx = contextForModel(model);
+    const totalContext = dyn?.contextInput ?? ctx?.input ?? DEFAULT_MAX_INPUT_TOKENS;
+    const outputBudget = dyn?.maxOutput ?? ctx?.output ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    const maxOutputTokens = Math.min(outputBudget, Math.max(1, Math.floor(totalContext / 2)));
+    const maxInputTokens = Math.max(totalContext - maxOutputTokens, 1);
     return [{
       id: p.id,
       name: `${p.label} — ${model}`,
       family: p.id,
       version: '1',
-      maxInputTokens: dyn?.contextInput ?? ctx?.input ?? DEFAULT_MAX_INPUT_TOKENS,
-      maxOutputTokens: dyn?.maxOutput ?? ctx?.output ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      maxInputTokens,
+      maxOutputTokens,
       // Advertise tool calling so the model is selectable in agent/edit/Ctrl+I — those pickers hide
       // models that don't declare it. The response glue forwards the tools and emits tool-call parts.
       // imageInput from models.dev's modalities, else the conservative id heuristic.
