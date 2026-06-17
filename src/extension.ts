@@ -23,6 +23,7 @@ import {
   Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, planLegacyMigration,
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
 } from './catalog';
+import { registerWispChatProvider } from './chatProvider';
 
 // ----------------------------- Constants ----------------------------- //
 
@@ -45,16 +46,19 @@ const SECRET_KEY = 'wisp.apiKey';
 // three still marked ⚠ are BEST-EFFORT presets — no key was available to verify them against each GET
 // /models, so the panel's model picker / type-field is the correction path. ⚠ Ollama Cloud is `/v1`,
 // NOT `/api/v1` (the `/api` prefix is Ollama's native protocol and breaks the OpenAI SDK — see gotchas.md).
+// Chat-surface context windows and vision are read LIVE for the active model from models.dev (via each
+// row's catalogKey), falling back to the contextForModel / modelSupportsVision heuristics when a model
+// isn't in models.dev or the fetch fails — so they track model switches with no per-row hints to drift.
 const PROVIDERS: Provider[] = [
-  { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/go/v1', defaultModel: 'minimax-m3', apiKeyEnv: 'OPENCODE_API_KEY' },
-  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY' },
-  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', apiKeyEnv: 'GROQ_API_KEY' },
-  { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', defaultModel: 'codestral-latest', apiKeyEnv: 'MISTRAL_API_KEY' },
-  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o-mini', apiKeyEnv: 'OPENROUTER_API_KEY' },
-  { id: 'ollama', label: 'Ollama (local)', baseUrl: 'http://localhost:11434/v1', defaultModel: 'qwen2.5-coder' /* ⚠ best-effort: user must have pulled it */, apiKeyEnv: '' },
-  { id: 'ollama-cloud', label: 'Ollama Cloud', baseUrl: 'https://ollama.com/v1', defaultModel: 'gpt-oss:120b' /* verified working 2026-06-16 */, apiKeyEnv: 'OLLAMA_API_KEY' },
-  { id: 'kilocode', label: 'KiloCode', baseUrl: 'https://api.kilo.ai/api/gateway', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify namespace via /models */, apiKeyEnv: 'KILOCODE_API_KEY' },
-  { id: 'cline', label: 'Cline', baseUrl: 'https://api.cline.bot/api/v1', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify via /models */, apiKeyEnv: 'CLINE_API_KEY' },
+  { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/go/v1', defaultModel: 'minimax-m3', apiKeyEnv: 'OPENCODE_API_KEY', catalogKey: 'opencode-go' },
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY', catalogKey: 'openai' },
+  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', apiKeyEnv: 'GROQ_API_KEY', catalogKey: 'groq' },
+  { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', defaultModel: 'codestral-latest', apiKeyEnv: 'MISTRAL_API_KEY', catalogKey: 'mistral' },
+  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o-mini', apiKeyEnv: 'OPENROUTER_API_KEY', catalogKey: 'openrouter' },
+  { id: 'ollama', label: 'Ollama (local)', baseUrl: 'http://localhost:11434/v1', defaultModel: 'qwen2.5-coder' /* ⚠ best-effort: user must have pulled it */, apiKeyEnv: '' /* local models aren't in models.dev → table/default */ },
+  { id: 'ollama-cloud', label: 'Ollama Cloud', baseUrl: 'https://ollama.com/v1', defaultModel: 'gpt-oss:120b' /* verified working 2026-06-16 */, apiKeyEnv: 'OLLAMA_API_KEY', catalogKey: 'ollama-cloud' },
+  { id: 'kilocode', label: 'KiloCode', baseUrl: 'https://api.kilo.ai/api/gateway', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify namespace via /models */, apiKeyEnv: 'KILOCODE_API_KEY', catalogKey: 'kilo' },
+  { id: 'cline', label: 'Cline', baseUrl: 'https://api.cline.bot/api/v1', defaultModel: 'anthropic/claude-3.5-sonnet' /* ⚠ best-effort: verify via /models */, apiKeyEnv: 'CLINE_API_KEY' /* not in models.dev → table/default */ },
   // Custom: the always-works escape hatch and the only Provider whose base URL + model are
   // user-supplied (machine-scoped wisp.baseUrl + a typed model, resolved at runtime by
   // activeBaseUrl()). No env fallback — its key lives only in the wisp.apiKey.custom slot.
@@ -113,12 +117,26 @@ const activeModel = (): string =>
 // user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
 const activeBaseUrl = (): string => resolveBaseUrl(activeProvider(), cfg().get<string>('baseUrl') ?? '');
 
-// Key resolution for the Active Provider: its namespaced SecretStorage slot first, then the row's own
-// env var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings.
-const resolveApiKey = async (): Promise<string> => {
-  const p = activeProvider();
+// Key resolution for a given Provider: its namespaced SecretStorage slot first, then the row's own env
+// var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings. Takes
+// the Provider explicitly so the chat surface can resolve any catalog row, not only the Active one.
+const keyForProvider = async (p: Provider): Promise<string> => {
   const stored = await secrets.get(keySlot(p.id));
   return stored?.trim() || (p.apiKeyEnv ? process.env[p.apiKeyEnv] : '') || '';
+};
+
+// The Active Provider's key — Inquire's path. Thin delegate so there is one key-resolution rule.
+const resolveApiKey = (): Promise<string> => keyForProvider(activeProvider());
+
+// Build a fresh client for an arbitrary Provider (the chat surface picks per-request, so the Active
+// Provider's cachedClient doesn't apply). Returns undefined when the Provider has no key, or is Custom
+// with no base URL — i.e. nothing to send to. Construction is local (no network), so per-call is fine.
+const clientForProvider = async (p: Provider): Promise<OpenAI | undefined> => {
+  const key = await keyForProvider(p);
+  if (!key) return undefined;
+  const baseURL = resolveBaseUrl(p, cfg().get<string>('baseUrl') ?? '');
+  if (!baseURL) return undefined;
+  return new OpenAI({ apiKey: key, baseURL });
 };
 
 // Build (and cache) the client from the Active Provider's resolved {baseUrl, key}. Base URL is the
@@ -542,6 +560,16 @@ export const activate = (context: vscode.ExtensionContext): void => {
     removedDecoration,
     onDidChangeCodeLenses,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, editCodeLensProvider),
+    // Additional surface: expose the catalog's keyed Providers as models in VS Code's native chat /
+    // Ctrl+I picker. extension.ts owns key resolution; the provider module is pure vscode/openai glue.
+    registerWispChatProvider({
+      providers: PROVIDERS,
+      modelMap: () => globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {},
+      customBaseUrl: () => cfg().get<string>('baseUrl') ?? '',
+      keyFor: keyForProvider,
+      clientFor: clientForProvider,
+      log: (m) => output.appendLine(m),
+    }),
     // Keep derived state in sync when settings change out from under us.
     vscode.workspace.onDidChangeConfiguration((e) => {
       // Active Provider, its (Custom) base URL, or its mirrored model changed → rebuild the client.

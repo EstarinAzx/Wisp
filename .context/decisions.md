@@ -316,6 +316,70 @@ marginal gain. The whole-document diff **span** is safe (unlike the reverted who
 real use shows verbatim misses are frequent (see [[gotchas]]). Don't re-add `extractEditText`/whole-file
 re-emit.
 
+## 2026-06-18 — LM Chat Provider (slice #7) built; HITL gate resolved
+
+**Decision:** Built the deferred bonus — Wisp registers a **Language Model Chat Provider** (vendor
+`wisp`) so its keyed Providers appear as models in VS Code's **native** chat / Ctrl+I picker, streaming
+through Wisp's own OpenAI-compatible client. New `src/chatProvider.ts` (vscode/openai glue) +
+pure `buildChatModelInfos` in `catalog.ts` (one row per *usable* Provider: key + resolvable model +
+Custom's URL). `extension.ts` generalized to per-Provider key/client resolvers; Inquire untouched.
+**HITL gate resolved (was the blocker):** `registerLanguageModelChatProvider` is **finalized in VS
+Code 1.104** (Aug 2025), NOT proposed API — publishable. The "BYOK needs Copilot Business/Enterprise"
+worry is Copilot's *own* BYOK (Manage Models), a different feature; our extension API is open. Cost:
+`engines.vscode` + `@types/vscode` bumped to `^1.104`.
+**Why now:** the user asked for it after the core slices landed; gating verified before any code.
+**Reversibility:** additive surface — easy to drop; Inquire does not depend on it.
+
+## 2026-06-18 — Tool calling + vision passthrough (honest capabilities)
+
+**Decision:** Declare a capability ONLY with its real implementation. **Tool calling**: advertise
+`toolCalling: true` AND forward `options.tools` → reassemble streamed `delta.tool_calls` →
+`LanguageModelToolCallPart` (pure `toOpenAiTools`/`buildOpenAiChatMessages`/`assembleToolCalls` in
+`catalog.ts`, TDD'd). **Vision**: forward image `LanguageModelDataPart`s as OpenAI `image_url` data
+URIs, multimodal user content built by `buildOpenAiChatMessages`.
+**Why:** VS Code hides models without `toolCalling` from the agent/edit/Ctrl+I pickers (only Ask mode /
+"Other Models" showed them) — so the capability is required for selection, and declaring it without the
+passthrough would let agent mode pick a model that silently can't call tools.
+**Reversibility:** easy; out of scope stays image *output*, prompt-tsx, managementCommand.
+
+## 2026-06-18 — Read real context/vision LIVE from models.dev (the big one)
+
+**Decision:** Stop hardcoding context windows / vision. Read them live from **[models.dev](https://models.dev)**
+`api.json` — a public, no-auth aggregated catalog (~145 providers) carrying each model's real
+`limit.context`, `limit.output`, and `modalities.input` (contains `"image"` ⇒ vision). Each Provider row
+gains a **`catalogKey`** (matched to models.dev by **base-URL**, not name — e.g. `.../zen/go/v1` →
+**`opencode-go`**, NOT `opencode`; `kilocode` → `kilo`). New `src/modelsDev.ts` fetches + caches (30-min
+TTL, in-flight dedupe, warmed at registration, 4-s timeout so a cold fetch never stalls the picker).
+Pure `parseModelsDevEntry`/`lookupModelsDevCaps` in `catalog.ts`. Resolution chain per field:
+**models.dev → hardcoded heuristic table (`CONTEXT_TABLE`/`VISION_FAMILIES`) → neutral default**.
+**Why models.dev over per-provider /models:** ~half the providers publish **nothing** via their own API
+(OpenAI, OpenCode Zen — verified against OpenAI's OpenAPI spec/SDK); others need special endpoints
+(Ollama `POST /api/show` per model, Cline's authed path). models.dev is the one source covering all of
+them + vision, in a single cached fetch. Discovered + adversarially verified by a 19-agent research
+workflow (686k tokens) — the provider-key map and field names are verified against the live `api.json`
+and its source Zod schema. **Local Ollama, Cline, Custom are absent from models.dev → table/default.**
+**Reversibility:** easy — caps are injected and degrade to the old table behaviour on any failure. The
+table is now a *fallback*, kept deliberately (offline / models models.dev doesn't list).
+
+## 2026-06-18 — Context window is DECOMPOSED into input+output (display correctness)
+
+**Decision:** VS Code's "Context Size" column = `maxInputTokens + maxOutputTokens` (summed). So treat
+the source value as the **total** window and split it: `maxOutputTokens = min(output, floor(window/2))`,
+`maxInputTokens = window − maxOutputTokens`. The pair sums to the real context; the half-window cap stops
+an anomalous `output == context` entry (real: `kimi-k2.7-code`, ctx=out=262144) from zeroing the input.
+**Why:** passing `context` as input AND `output` as output inflated every model (kimi showed 524K vs its
+real 256K; gpt-4o-mini 144K vs 128K). Verified live: kimi 256K, gpt-4o-mini 128K — matching each
+provider's real window (and Ollama's display).
+**Reversibility:** easy.
+
+## 2026-06-18 — Released v1.0.0
+
+**Decision:** First **stable release**. Bundles everything unreleased since `v0.0.3`: rebrand to Wisp,
+the multi-provider catalog, the Inquire inline-edit pivot (Completion removed), and the LM Chat Provider
+(tool calling, vision, live models.dev capabilities). Added `CHANGELOG.md`. `engines.vscode ^1.104`.
+**Why 1.0.0 (not 0.0.9):** the inline-edit + native-chat surfaces make this a feature-complete product,
+and the min-VS-Code bump + Completion removal are breaking — a major bump is honest.
+
 ## Related
 - [[overview]]
 - [[gotchas]]

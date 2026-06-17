@@ -19,6 +19,11 @@ export type Provider = {
   baseUrl: string;       // hardcoded OpenAI-compatible base URL ('' for Custom — comes from settings)
   defaultModel: string;  // native-format model id used when the Provider has none remembered
   apiKeyEnv: string;     // env-var fallback for the key ('' = none, e.g. local Ollama)
+  // models.dev provider key for live context/vision (e.g. opencode-zen -> 'opencode-go', kilocode ->
+  // 'kilo'). Omitted (local Ollama, Cline, Custom) -> no dynamic lookup; falls back to table/default.
+  catalogKey?: string;
+  // Note: context/vision carry no per-row hints — both come from the ACTIVE model: models.dev caps via
+  // catalogKey, else the contextForModel / modelSupportsVision heuristics. So they track model switches.
 };
 
 // ----------------------------- Constants ----------------------------- //
@@ -177,6 +182,230 @@ export const diffLines = (before: string, after: string): DiffOp[] => {
   while (i < n) { ops.push({ type: 'remove', text: a[i] }); i++; }
   while (j < m) { ops.push({ type: 'add', text: b[j] }); j++; }
   return ops;
+};
+
+// ----------------------------- LM chat-provider descriptors ----------------------------- //
+
+// A vscode-free mirror of vscode.LanguageModelChatInformation — the descriptor the native chat picker
+// renders one row from. Kept structural (not the vscode type) so this stays unit-testable; the
+// chat-provider glue assigns the array straight to LanguageModelChatInformation[] (shapes match).
+export type ChatModelInfo = {
+  id: string;
+  name: string;
+  family: string;
+  version: string;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  capabilities: { toolCalling?: boolean; imageInput?: boolean };
+};
+
+// Arbitrary OpenAI-compatible backends don't report their own limits, so advertise conservative caps.
+const DEFAULT_MAX_INPUT_TOKENS = 128_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
+
+// Substrings of known multimodal model families. Vision is really a per-MODEL trait, but a Provider
+// (Zen, OpenRouter, …) serves many models, so detect it from the active model id rather than the row —
+// that way Zen-serving-Claude or OpenRouter-serving-Gemini light up vision too. Conservative on purpose:
+// only families that broadly accept image input, so we never over-declare and send images a backend 400s.
+const VISION_FAMILIES = [
+  'claude-3', 'claude-opus', 'claude-sonnet', 'claude-haiku', // Claude 3.x / 4.x are multimodal
+  'gpt-4o', 'gpt-4.1', 'gpt-4-turbo', 'gpt-5',
+  'gemini', 'pixtral', 'llava', 'vision',                     // 'vision' catches *-vision ids
+  'qwen-vl', 'qwen2-vl', 'qwen2.5-vl',
+];
+
+// Whether a model id looks like a known vision-capable family (case-insensitive substring match).
+export const modelSupportsVision = (modelId: string): boolean => {
+  const id = modelId.toLowerCase();
+  return VISION_FAMILIES.some((family) => id.includes(family));
+};
+
+// Best-effort context windows by model family, so the advertised size tracks the ACTIVE model rather
+// than the Provider — a single Provider serves many models with very different windows. Ordered: the
+// first substring that matches the (lowercased) model id wins, so list specific families before broad
+// ones. Numbers are approximate (no standard /models field reports them) — this table is where to fix
+// them. Unknown models fall through to the conservative DEFAULT_MAX_* constants.
+export type ModelContext = { input: number; output: number };
+const CONTEXT_TABLE: { match: string; input: number; output: number }[] = [
+  { match: 'gpt-4.1', input: 1_000_000, output: 32_768 },
+  { match: 'gpt-4o', input: 128_000, output: 16_384 },
+  { match: 'gpt-4-turbo', input: 128_000, output: 4_096 },
+  { match: 'gpt-5', input: 256_000, output: 32_768 },
+  { match: 'gpt-oss', input: 128_000, output: 32_768 },
+  { match: 'claude-3', input: 200_000, output: 8_192 },
+  { match: 'claude-opus', input: 200_000, output: 8_192 },
+  { match: 'claude-sonnet', input: 200_000, output: 8_192 },
+  { match: 'claude-haiku', input: 200_000, output: 8_192 },
+  { match: 'gemini', input: 1_000_000, output: 8_192 },
+  { match: 'codestral', input: 256_000, output: 4_096 },
+  { match: 'mistral-large', input: 128_000, output: 4_096 },
+  { match: 'llama-3', input: 128_000, output: 32_768 },
+  { match: 'qwen', input: 32_768, output: 8_192 },
+  { match: 'deepseek', input: 128_000, output: 8_192 },
+  { match: 'kimi', input: 256_000, output: 8_192 },
+  { match: 'pixtral', input: 128_000, output: 4_096 },
+];
+
+// The context window for a model id, or undefined when no family matches (caller uses the defaults).
+export const contextForModel = (modelId: string): ModelContext | undefined => {
+  const id = modelId.toLowerCase();
+  const hit = CONTEXT_TABLE.find((e) => id.includes(e.match));
+  return hit ? { input: hit.input, output: hit.output } : undefined;
+};
+
+// ----------------------------- models.dev capability source ----------------------------- //
+
+// The REAL per-model capabilities, the primary (dynamic) source that demotes the hardcoded table above
+// to a fallback. All optional — a source may know some fields and not others; the builder fills each
+// gap from the table, then the default.
+export type ModelCaps = { contextInput?: number; maxOutput?: number; vision?: boolean };
+
+// The slices we read from models.dev's api.json (it carries far more we ignore). The catalog is the
+// whole document keyed by provider id (e.g. "opencode-go", "groq"), each with a models map.
+type ModelsDevEntry = { limit?: { context?: number; output?: number }; modalities?: { input?: string[] } };
+export type ModelsDevCatalog = Record<string, { models?: Record<string, ModelsDevEntry> }>;
+
+// Map one models.dev model entry to ModelCaps. Vision = its input modalities include "image" (the
+// verified reliable signal — NOT the unrelated "attachment" flag). Absent fields stay undefined.
+export const parseModelsDevEntry = (entry: ModelsDevEntry): ModelCaps => ({
+  contextInput: entry.limit?.context,
+  maxOutput: entry.limit?.output,
+  vision: entry.modalities?.input?.includes('image') ?? false,
+});
+
+// Look up a model's caps in a fetched models.dev catalog by provider key + model id; undefined when the
+// catalog/provider/model is absent (the builder then falls back to the table/default).
+export const lookupModelsDevCaps = (catalog: ModelsDevCatalog | undefined, key: string, modelId: string): ModelCaps | undefined => {
+  const entry = catalog?.[key]?.models?.[modelId];
+  return entry ? parseModelsDevEntry(entry) : undefined;
+};
+
+// Build the descriptors Wisp advertises into VS Code's native model picker: one row per Provider that
+// is actually usable. Usable = has a key AND a resolvable model AND (for Custom only) a base URL — a
+// keyless / URL-less / model-less Provider can't serve a request, so it stays hidden rather than
+// appearing as a dead pick. id is the Provider id (the response glue maps it back to {baseUrl,key}).
+// `caps` (optional, injected) is the dynamic models.dev lookup; each field resolves dynamic -> table ->
+// default, so a missing/slow/failed fetch silently degrades to the hardcoded behaviour.
+export const buildChatModelInfos = (
+  providers: Provider[],
+  state: {
+    keyed: Record<string, boolean>;
+    modelMap: Record<string, string>;
+    customBaseUrl: string;
+    caps?: (provider: Provider, model: string) => ModelCaps | undefined;
+  },
+): ChatModelInfo[] =>
+  providers.flatMap((p) => {
+    const model = resolveModel(state.modelMap, p);
+    // Custom has no hardcoded URL — without wisp.baseUrl there is nowhere to send the request.
+    const reachable = p.id !== CUSTOM_ID || state.customBaseUrl.trim() !== '';
+    if (!state.keyed[p.id] || !model || !reachable) return [];
+    // Each field: dynamic models.dev caps -> hardcoded table -> conservative default. contextInput is
+    // the TOTAL context window (models.dev limit.context). VS Code's "Context Size" column SUMS
+    // maxInput+maxOutput, so decompose the window: reserve the output budget, leave the rest for input
+    // (output capped at half the window so an anomalous "output == context" can't zero the input).
+    const dyn = state.caps?.(p, model);
+    const ctx = contextForModel(model);
+    const totalContext = dyn?.contextInput ?? ctx?.input ?? DEFAULT_MAX_INPUT_TOKENS;
+    const outputBudget = dyn?.maxOutput ?? ctx?.output ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    const maxOutputTokens = Math.min(outputBudget, Math.max(1, Math.floor(totalContext / 2)));
+    const maxInputTokens = Math.max(totalContext - maxOutputTokens, 1);
+    return [{
+      id: p.id,
+      name: `${p.label} — ${model}`,
+      family: p.id,
+      version: '1',
+      maxInputTokens,
+      maxOutputTokens,
+      // Advertise tool calling so the model is selectable in agent/edit/Ctrl+I — those pickers hide
+      // models that don't declare it. The response glue forwards the tools and emits tool-call parts.
+      // imageInput from models.dev's modalities, else the conservative id heuristic.
+      capabilities: { toolCalling: true, ...((dyn?.vision ?? modelSupportsVision(model)) ? { imageInput: true } : {}) },
+    }];
+  });
+
+// ----------------------------- Tool calling (chat surface) ----------------------------- //
+
+// vscode-free mirrors of the tool-calling shapes, so the message/tool/stream plumbing stays unit-
+// testable. chatProvider.ts extracts the vscode parts into these plain forms and feeds them here.
+
+// A tool the model may call (name + description + JSON-schema input), and its OpenAI function-tool form.
+export type ToolSpec = { name: string; description: string; inputSchema?: object };
+export type OAToolDef = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
+
+// Map VS Code tool defs to OpenAI function tools — inputSchema becomes the function parameters
+// (empty object when a tool takes no input, which the OpenAI API still requires as a present field).
+export const toOpenAiTools = (tools: ToolSpec[]): OAToolDef[] =>
+  tools.map((t) => ({
+    type: 'function',
+    function: { name: t.name, description: t.description, parameters: (t.inputSchema as Record<string, unknown>) ?? {} },
+  }));
+
+// One chat turn flattened to plain data: its text, any tool calls it made (assistant turns), any tool
+// results it carries (user turns), and any attached images (user turns). chatProvider.ts builds these
+// from the vscode message parts; images is optional (most turns have none).
+export type NormalizedTurn = {
+  role: 'user' | 'assistant';
+  text: string;
+  toolCalls: { id: string; name: string; argsJson: string }[];
+  toolResults: { callId: string; content: string }[];
+  images?: { mimeType: string; dataBase64: string }[];
+};
+
+// One OpenAI message-content part for a multimodal (vision) user message.
+type OAContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
+// One OpenAI chat message. A user message is a plain string unless it has images, then it is the
+// multimodal content array. Assistant turns may carry tool_calls; a tool result is its own 'tool'
+// message keyed by the call id. Hand-rolled (catalog imports nothing) — structurally the SDK's param.
+export type OAChatMessage =
+  | { role: 'user'; content: string | OAContentPart[] }
+  | { role: 'assistant'; content: string; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+
+// Flatten the normalized turns into the OpenAI message sequence. A user turn's tool results expand into
+// standalone 'tool' messages (emitted before any user text so the assistant(tool_calls)→tool ordering
+// the API requires is preserved); a user turn with only tool results yields no empty user message. An
+// image-bearing user turn becomes a multimodal content array (text part + image_url data URIs).
+export const buildOpenAiChatMessages = (turns: NormalizedTurn[]): OAChatMessage[] =>
+  turns.flatMap((turn) => {
+    if (turn.role === 'assistant') {
+      const calls = turn.toolCalls.map((c) => ({ id: c.id, type: 'function' as const, function: { name: c.name, arguments: c.argsJson } }));
+      return [calls.length
+        ? { role: 'assistant' as const, content: turn.text, tool_calls: calls }
+        : { role: 'assistant' as const, content: turn.text }];
+    }
+    const toolMsgs: OAChatMessage[] = turn.toolResults.map((r) => ({ role: 'tool', tool_call_id: r.callId, content: r.content }));
+    const images = turn.images ?? [];
+    // A bare tool-result turn carries no user prose or image, so don't emit an empty user message.
+    if (turn.toolResults.length && !turn.text && !images.length) return toolMsgs;
+    const content: string | OAContentPart[] = images.length
+      ? [
+          ...(turn.text ? [{ type: 'text' as const, text: turn.text }] : []),
+          ...images.map((img) => ({ type: 'image_url' as const, image_url: { url: `data:${img.mimeType};base64,${img.dataBase64}` } })),
+        ]
+      : turn.text;
+    return [...toolMsgs, { role: 'user' as const, content }];
+  });
+
+// OpenAI streams a tool call across chunks: id + name land on the first delta for an index, the
+// arguments arrive as fragments on later deltas. Folded form once the stream completes.
+export type ToolCallDelta = { index: number; id?: string; name?: string; args?: string };
+export type AssembledToolCall = { id: string; name: string; argsJson: string };
+
+// Reassemble streamed tool-call deltas into whole calls. Keyed by the stream index so parallel calls
+// stay separate; id/name are taken from whichever fragment carries them and argument fragments are
+// concatenated in arrival order. Returned in first-seen index order.
+export const assembleToolCalls = (deltas: ToolCallDelta[]): AssembledToolCall[] => {
+  const byIndex = new Map<number, AssembledToolCall>();
+  for (const d of deltas) {
+    const call = byIndex.get(d.index) ?? { id: '', name: '', argsJson: '' };
+    if (d.id) call.id = d.id;
+    if (d.name) call.name = d.name;
+    if (d.args) call.argsJson += d.args;
+    byIndex.set(d.index, call);
+  }
+  return [...byIndex.values()];
 };
 
 // ----------------------------- Migration ----------------------------- //

@@ -4,6 +4,9 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveModel, resolveBaseUrl, planLegacyMigration,
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
+  buildChatModelInfos, buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools,
+  modelSupportsVision, contextForModel,
+  parseModelsDevEntry, lookupModelsDevCaps,
   CUSTOM_ID, type Provider,
 } from './catalog';
 
@@ -207,6 +210,283 @@ describe('buildEditPrompt', () => {
     const [system] = buildEditPrompt({ instruction: 'x', languageId: 'js', context: '' });
     expect(system.content).toContain('SEARCH');
     expect(system.content).toContain('REPLACE');
+  });
+});
+
+describe('buildChatModelInfos', () => {
+  const zen = provider({ id: 'opencode-zen', label: 'OpenCode Zen', defaultModel: 'minimax-m3' });
+  const groq = provider({ id: 'groq', label: 'Groq', defaultModel: 'llama-3.3-70b-versatile' });
+  const custom = provider({ id: CUSTOM_ID, label: 'Custom', baseUrl: '', defaultModel: '' });
+
+  // Only providers with a usable key get advertised — a keyless backend would just 401, so it stays
+  // hidden from the native picker rather than appearing as a dead option.
+  it('advertises only providers that have a key', () => {
+    const infos = buildChatModelInfos([zen, groq], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '' });
+    expect(infos.map((i) => i.id)).toEqual(['opencode-zen']);
+  });
+
+  // The picker label is "<label> — <model>"; a remembered model wins over the native default.
+  it('names an entry "<label> — <model>" using the remembered model', () => {
+    const infos = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: { 'opencode-zen': 'gpt-4o-mini' }, customBaseUrl: '' });
+    expect(infos[0].name).toBe('OpenCode Zen — gpt-4o-mini');
+  });
+
+  it('falls back to the native default model in the name', () => {
+    const infos = buildChatModelInfos([groq], { keyed: { groq: true }, modelMap: {}, customBaseUrl: '' });
+    expect(infos[0].name).toBe('Groq — llama-3.3-70b-versatile');
+  });
+
+  // Custom has no hardcoded base URL — without wisp.baseUrl there is nowhere to send the request,
+  // so it must not be advertised even with a key and a model.
+  it('excludes Custom when it has a key and model but no base URL', () => {
+    const infos = buildChatModelInfos([custom], { keyed: { custom: true }, modelMap: { custom: 'my-model' }, customBaseUrl: '' });
+    expect(infos).toEqual([]);
+  });
+
+  it('includes Custom when key, model and base URL are all present', () => {
+    const infos = buildChatModelInfos([custom], { keyed: { custom: true }, modelMap: { custom: 'my-model' }, customBaseUrl: 'https://proxy.local/v1' });
+    expect(infos.map((i) => i.id)).toEqual([CUSTOM_ID]);
+    expect(infos[0].name).toBe('Custom — my-model');
+  });
+
+  // Custom's defaultModel is '' — with a key and base URL but no remembered model there is no id to
+  // advertise, so it is skipped (built-ins always have a non-empty default, so this only bites Custom).
+  it('excludes a keyed provider whose resolved model is empty', () => {
+    const infos = buildChatModelInfos([custom], { keyed: { custom: true }, modelMap: {}, customBaseUrl: 'https://proxy.local/v1' });
+    expect(infos).toEqual([]);
+  });
+
+  // The vscode LanguageModelChatInformation shape requires these fields; toolCalling is advertised so
+  // the model is selectable in agent/edit/Ctrl+I (those pickers filter to tool-capable models).
+  it('fills the vscode-required descriptor fields and advertises tool calling', () => {
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '' });
+    expect(info).toMatchObject({ id: 'opencode-zen', family: 'opencode-zen' });
+    expect(info.capabilities).toEqual({ toolCalling: true });
+    expect(typeof info.version).toBe('string');
+    expect(info.maxInputTokens).toBeGreaterThan(0);
+    expect(info.maxOutputTokens).toBeGreaterThan(0);
+  });
+
+  // Context follows the ACTIVE model id via the lookup table — switch a Provider to a known model and
+  // its window updates (here Zen serving a 200K Claude despite its 'minimax-m3' default). The window is
+  // DECOMPOSED into input+output (VS Code sums them for display), so the pair totals the real context.
+  it('sizes context from the active model via the lookup', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: { 'opencode-zen': 'claude-sonnet-4' }, customBaseUrl: '' });
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(200_000);
+    expect(info.maxOutputTokens).toBe(8_192);
+  });
+
+  // A model the table doesn't know falls back to the conservative defaults.
+  it('falls back to default caps for an unknown model', () => {
+    const p = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'mystery-x' });
+    const [info] = buildChatModelInfos([p], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '' });
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(128_000);
+    expect(info.maxOutputTokens).toBe(4_096);
+  });
+
+  // Dynamic models.dev caps (injected) win over the hardcoded table/heuristic — the whole point:
+  // minimax-m3 is in neither CONTEXT_TABLE nor VISION_FAMILIES, but models.dev knows its real numbers.
+  it('prefers injected dynamic caps over the table', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
+    const caps = () => ({ contextInput: 512_000, maxOutput: 131_072, vision: true });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps });
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(512_000);
+    expect(info.maxOutputTokens).toBe(131_072);
+    expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+
+  // An anomalous "output == context" entry (real: kimi-k2.7-code, ctx=out=262144) must not zero the
+  // input budget — output is capped at half the window so the pair still totals the real context.
+  it('caps output at half the window when output equals context', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'kimi' });
+    const caps = () => ({ contextInput: 262_144, maxOutput: 262_144, vision: true });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps });
+    expect(info.maxInputTokens).toBe(131_072);
+    expect(info.maxOutputTokens).toBe(131_072);
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(262_144);
+  });
+
+  // When caps are unavailable (model absent from models.dev / fetch failed) it degrades to today's
+  // table/heuristic behaviour.
+  it('falls back to table/default when caps return undefined', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps: () => undefined });
+    expect(info.maxInputTokens + info.maxOutputTokens).toBe(128_000);
+    expect(info.capabilities).toEqual({ toolCalling: true });
+  });
+
+  // A Provider whose default model is a vision family advertises imageInput; text-only defaults (Zen's
+  // minimax-m3, covered above) stay tool-calling-only.
+  it('advertises imageInput when the default model is a vision model', () => {
+    const seeing = provider({ id: 'openai', label: 'OpenAI', defaultModel: 'gpt-4o-mini' });
+    const [info] = buildChatModelInfos([seeing], { keyed: { openai: true }, modelMap: {}, customBaseUrl: '' });
+    expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+
+  // Vision also follows the ACTIVE model id, so a non-vision Provider serving a vision model (e.g. Zen
+  // serving Claude) advertises imageInput even though its row has no vision flag.
+  it('advertises imageInput when the active model is a known vision model', () => {
+    const zenServingClaude = provider({ id: 'opencode-zen', label: 'OpenCode Zen', defaultModel: 'minimax-m3' });
+    const [info] = buildChatModelInfos([zenServingClaude], { keyed: { 'opencode-zen': true }, modelMap: { 'opencode-zen': 'claude-sonnet-4' }, customBaseUrl: '' });
+    expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+});
+
+describe('parseModelsDevEntry', () => {
+  // models.dev carries the real numbers: limit.context/output and modalities.input (image => vision).
+  it('reads context, output and vision from a models.dev entry', () => {
+    const entry = { limit: { context: 512_000, output: 131_072 }, modalities: { input: ['text', 'image', 'video'], output: ['text'] } };
+    expect(parseModelsDevEntry(entry)).toEqual({ contextInput: 512_000, maxOutput: 131_072, vision: true });
+  });
+
+  it('marks text-only input modalities as no vision', () => {
+    const entry = { limit: { context: 131_072, output: 32_768 }, modalities: { input: ['text'] } };
+    expect(parseModelsDevEntry(entry)).toEqual({ contextInput: 131_072, maxOutput: 32_768, vision: false });
+  });
+
+  // Defensive against a partial/odd entry — missing limit/modalities must not throw.
+  it('tolerates missing limit and modalities', () => {
+    expect(parseModelsDevEntry({})).toEqual({ contextInput: undefined, maxOutput: undefined, vision: false });
+  });
+});
+
+describe('lookupModelsDevCaps', () => {
+  const catalog = {
+    'opencode-go': { models: { 'minimax-m3': { limit: { context: 512_000, output: 131_072 }, modalities: { input: ['text', 'image'] } } } },
+  };
+
+  it('returns caps for a known provider key + model', () => {
+    expect(lookupModelsDevCaps(catalog, 'opencode-go', 'minimax-m3')).toEqual({ contextInput: 512_000, maxOutput: 131_072, vision: true });
+  });
+
+  it('returns undefined for an unknown provider key', () => {
+    expect(lookupModelsDevCaps(catalog, 'nope', 'minimax-m3')).toBeUndefined();
+  });
+
+  it('returns undefined for an unknown model', () => {
+    expect(lookupModelsDevCaps(catalog, 'opencode-go', 'ghost')).toBeUndefined();
+  });
+});
+
+describe('contextForModel', () => {
+  // Known families resolve to their input/output windows, regardless of which Provider serves them.
+  it('returns known family context windows', () => {
+    expect(contextForModel('claude-3.5-sonnet')).toEqual({ input: 200_000, output: 8_192 });
+    expect(contextForModel('gpt-4o-mini')).toEqual({ input: 128_000, output: 16_384 });
+    expect(contextForModel('gemini-2.0-flash')).toEqual({ input: 1_000_000, output: 8_192 });
+    expect(contextForModel('codestral-latest')).toEqual({ input: 256_000, output: 4_096 });
+  });
+
+  it('returns undefined for an unknown model', () => {
+    expect(contextForModel('mystery-model-x')).toBeUndefined();
+  });
+});
+
+describe('modelSupportsVision', () => {
+  // Known multimodal families are detected by a substring of the model id, regardless of Provider.
+  it('detects common vision model families', () => {
+    for (const id of ['claude-3.5-sonnet', 'claude-sonnet-4', 'gpt-4o-mini', 'gemini-2.0-flash', 'pixtral-large', 'llama-3.2-90b-vision'])
+      expect(modelSupportsVision(id)).toBe(true);
+  });
+
+  // Text-only coding models must NOT be flagged — over-declaring vision would send images a backend rejects.
+  it('returns false for text-only models', () => {
+    for (const id of ['minimax-m3', 'llama-3.3-70b-versatile', 'codestral-latest', 'qwen2.5-coder', 'gpt-oss:120b'])
+      expect(modelSupportsVision(id)).toBe(false);
+  });
+});
+
+describe('buildOpenAiChatMessages', () => {
+  // A plain user prompt becomes a single user message.
+  it('maps a user text turn to a user message', () => {
+    expect(buildOpenAiChatMessages([{ role: 'user', text: 'hi', toolCalls: [], toolResults: [] }]))
+      .toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  // A plain assistant turn becomes an assistant message with no tool_calls key.
+  it('maps an assistant text turn to an assistant message', () => {
+    expect(buildOpenAiChatMessages([{ role: 'assistant', text: 'sure', toolCalls: [], toolResults: [] }]))
+      .toEqual([{ role: 'assistant', content: 'sure' }]);
+  });
+
+  // An assistant turn that called tools carries them as OpenAI tool_calls (arguments already a JSON string).
+  it('carries assistant tool calls as OpenAI tool_calls', () => {
+    const turn = {
+      role: 'assistant' as const, text: '', toolResults: [],
+      toolCalls: [{ id: 'c1', name: 'readFile', argsJson: '{"path":"a.ts"}' }],
+    };
+    expect(buildOpenAiChatMessages([turn])).toEqual([
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'readFile', arguments: '{"path":"a.ts"}' } }] },
+    ]);
+  });
+
+  // Tool results live on a User turn but must become standalone OpenAI 'tool' messages keyed by callId.
+  it('maps a user turn of tool results to tool messages', () => {
+    const turn = { role: 'user' as const, text: '', toolCalls: [], toolResults: [{ callId: 'c1', content: 'file body' }] };
+    expect(buildOpenAiChatMessages([turn])).toEqual([{ role: 'tool', tool_call_id: 'c1', content: 'file body' }]);
+  });
+
+  // Full agent round-trip keeps OpenAI's required order: assistant(tool_calls) then the tool messages.
+  it('preserves order across a call/result round-trip', () => {
+    const msgs = buildOpenAiChatMessages([
+      { role: 'user', text: 'read a.ts', toolCalls: [], toolResults: [] },
+      { role: 'assistant', text: '', toolResults: [], toolCalls: [{ id: 'c1', name: 'readFile', argsJson: '{}' }] },
+      { role: 'user', text: '', toolCalls: [], toolResults: [{ callId: 'c1', content: 'body' }] },
+    ]);
+    expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+  });
+
+  // An attached image turns the user content into OpenAI's multimodal array (text part + image_url
+  // data URI). Without images the content stays a plain string (covered above).
+  it('builds a multimodal user message when the turn carries an image', () => {
+    const turn = { role: 'user' as const, text: 'what is this', toolCalls: [], toolResults: [], images: [{ mimeType: 'image/png', dataBase64: 'AAAA' }] };
+    expect(buildOpenAiChatMessages([turn])).toEqual([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+      ],
+    }]);
+  });
+});
+
+describe('assembleToolCalls', () => {
+  // OpenAI streams a tool call across chunks: id+name arrive first, arguments come in fragments.
+  it('reassembles one tool call from streamed fragments', () => {
+    expect(assembleToolCalls([
+      { index: 0, id: 'c1', name: 'readFile', args: '{"pa' },
+      { index: 0, args: 'th":"a.ts"}' },
+    ])).toEqual([{ id: 'c1', name: 'readFile', argsJson: '{"path":"a.ts"}' }]);
+  });
+
+  // Parallel tool calls are distinguished by their stream index.
+  it('keeps parallel tool calls separate by index', () => {
+    expect(assembleToolCalls([
+      { index: 0, id: 'c1', name: 'a', args: '{}' },
+      { index: 1, id: 'c2', name: 'b', args: '{}' },
+    ])).toEqual([
+      { id: 'c1', name: 'a', argsJson: '{}' },
+      { id: 'c2', name: 'b', argsJson: '{}' },
+    ]);
+  });
+
+  it('returns [] when there were no tool-call deltas', () => {
+    expect(assembleToolCalls([])).toEqual([]);
+  });
+});
+
+describe('toOpenAiTools', () => {
+  // VS Code tool defs map to OpenAI function tools; inputSchema becomes the function parameters.
+  it('maps a tool to an OpenAI function tool', () => {
+    expect(toOpenAiTools([{ name: 'readFile', description: 'read a file', inputSchema: { type: 'object' } }]))
+      .toEqual([{ type: 'function', function: { name: 'readFile', description: 'read a file', parameters: { type: 'object' } } }]);
+  });
+
+  // A tool with no schema still maps — parameters default to an empty object.
+  it('defaults missing inputSchema to an empty object', () => {
+    expect(toOpenAiTools([{ name: 'noArgs', description: 'd' }]))
+      .toEqual([{ type: 'function', function: { name: 'noArgs', description: 'd', parameters: {} } }]);
   });
 });
 

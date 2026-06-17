@@ -1,84 +1,64 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-18
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-17 by Opus 4.8 (auto)_
-_At commit: uncommitted (slice #8 staged for commit on `feat/inline-chat-pivot`)_
+_Last updated: 2026-06-18 by Opus 4.8._
+_Released **v1.0.0**. Branch `feat/lm-chat-provider` (slice #7 + dynamic capabilities) → PR → merged to `main`._
 
 ## Current focus
-**Slice #8 DONE — Inquire edits via SEARCH/REPLACE edit blocks.** The model gets the whole file +
-the instruction and returns Aider-style edit blocks (`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE`)
-instead of re-emitting a span/whole file. Wisp locates each SEARCH verbatim, splices in the REPLACE,
-and renders the before/after through the **existing B2 inline diff** (red/green decorations +
-Accept/Reject CodeLenses). This delivers caret-agnostic "edit anywhere" without the whole-file re-emit
-that mangled untouched code. Next: **slice #7** (deferred bonus — register Wisp as a VS Code LM chat
-provider), still gated on the BYOK/Copilot-plan question.
+**Slice #7 (LM Chat Provider) shipped, plus everything the user asked on top of it, then released v1.0.0.**
+Wisp's keyed Providers now appear as models in VS Code's **native** chat / Ctrl+I, with tool calling,
+vision, and **real per-model context/vision read live from models.dev**.
 
 ## State
-- **In flight:** nothing.
-- **Done this session (slice #8 / edit blocks):**
-  - `src/catalog.ts`: `parseEditBlocks(raw)` → `{ search, replace }[]` (Aider markers via one regex;
-    strips `<think>` first, normalizes CRLF→LF, ignores surrounding prose/```` ``` ```` fences; empty
-    REPLACE = deletion). `applyEditBlocks(documentText, blocks)` → `{ text, notFound }` — EOL-agnostic
-    first-occurrence locate+splice, applies each block against the running result, records misses
-    (empty search guarded → never injects at position 0). Output is LF; the caller rejoins with the
-    document EOL (same contract as `diffLines`). New `EditBlock` / `EditPlan` types.
-  - New block-eliciting `EDIT_SYSTEM_PROMPT`; `buildEditPrompt` **dropped `selectionText`** (the model
-    edits anywhere via blocks, no target span).
-  - **Removed** `extractEditText` + `stripFences` (orphaned — `parseEditBlocks` superseded them);
-    `stripThink` kept and reused by `parseEditBlocks`.
-  - `src/catalog.test.ts`: +`parseEditBlocks` (9) +`applyEditBlocks` (8) suites, reworked
-    `buildEditPrompt` tests for the new signature, dropped `extractEditText` tests. **35/35.**
-  - `src/extension.ts` `inquire`: `parseEditBlocks(reply)` → `applyEditBlocks(original)` → whole-doc
-    span through the **unchanged** `renderInlineDiff`. Guards: 0 blocks → "nothing to change";
-    all-not-found → "could not locate the text to edit"; no-op (applied == original) → "no change";
-    partial miss → warn "N of M edits could not be located". The whole-doc diff span is **safe** here
-    (the applied result preserves untouched code verbatim — NOT the re-emit the gotcha warns about).
-  - **Debug instrumentation** (raw-reply + miss/trimmedMatch logging) was added to diagnose the F5
-    misses, then **removed** before commit.
-  - **Verification:** `npm test` **35/35** · `npm run compile` **clean** · F5 eyeball PASSED (block
-    edit applies, minimal diff renders, Accept/Reject work).
+- **In flight:** nothing (v1.0.0 cut).
+- **Done this session (branch `feat/lm-chat-provider`, 7 feature commits + release):**
+  1. `src/chatProvider.ts` — registers the `wisp` Language Model Chat Provider; streams via Wisp's own
+     OpenAI client. Pure `buildChatModelInfos` in `catalog.ts`.
+  2. **Tool calling** — forward `options.tools`, reassemble streamed `delta.tool_calls` → tool-call parts.
+  3. **Vision** — forward image parts as `image_url` data URIs.
+  4–5. Context + vision derived from the **active model** (heuristic `CONTEXT_TABLE`/`VISION_FAMILIES`).
+  6. **Live models.dev** (`src/modelsDev.ts`) — real `limit.context`/`output`/`modalities` per model,
+     keyed by per-row `catalogKey`; heuristics demoted to fallback. (See [[decisions]] 2026-06-18.)
+  7. **Context decomposition** — split the window into input+output so VS Code's summed "Context Size"
+     column shows the real number (kimi 256K not 524K).
+  - **Release:** version → **1.0.0**, new `CHANGELOG.md`, GitHub release `v1.0.0` + `wisp-1.0.0.vsix`.
+- **Verification:** `npm test` **70/70**; `npm run compile` clean; live e2e against models.dev confirmed
+  (kimi 256K, gpt-4o-mini 128K, minimax-m3 512K + vision). Native-chat F5 done by the user earlier
+  (models appeared + selectable after tool-calling landed).
 - **Blocked:** nothing.
 
 ## Pick up here
-**Slice #7 — register Wisp as a VS Code Language Model Chat Provider (deferred bonus, HITL).**
-- **Resolve first (open question):** the Option-A BYOK gating — may need GitHub Copilot
-  Business/Enterprise (as of Apr 2026) vs docs saying no Copilot plan needed. This is the blocker;
-  settle it before building. See [[decisions]] 2026-06-17 pivot entry.
-- Inference stays on Wisp's own OpenAI-compatible client (provider-agnostic) — #7 only adds a *surface*
-  (Wisp models appearing in native inline chat), never replaces the client.
-- It's the LAST planned slice of the pivot; everything core (Inquire inline-chat editor + edit blocks)
-  is shipped.
+The #3 pivot epic is **complete** (slices #4–#8 + the #7 bonus all shipped). Next session is open:
+- **Optional cleanup (offered, not yet done):** strip `CONTEXT_TABLE` + `VISION_FAMILIES` so the only
+  fallback is a neutral default (no per-model *guesses*) — the user leaned toward keeping them as offline
+  fallback. Decide if/when.
+- **Carried backlog:** verify the 3 still-⚠ `defaultModel`s once keys exist (`ollama` `qwen2.5-coder`,
+  `kilocode`/`cline` `anthropic/claude-3.5-sonnet` — the latter two are stale ids absent from models.dev,
+  so they fall back today). README pass for `wisp.provider` / catalog / native-chat usage.
 
 ## Skills for next session
-- `superpowers:test-driven-development` — keep any new pure core (e.g. a chat-provider adapter) red-green.
-- `superpowers:systematic-debugging` — the edit-block F5 misses were chased this way; reuse it for #7's
-  provider-registration quirks.
+- `superpowers:test-driven-development` — TDD any new pure logic into `src/catalog.ts` (`npm test`).
+- `superpowers:brainstorming` — for any new feature the user brings.
 
 ## Open questions
-- **Slice #7 (Option A) gating** — BYOK / LM-chat-provider Copilot-plan requirement (above). Unresolved.
-- **Edit-block match fidelity (deferred fork)** — matching is **exact** (EOL-agnostic only), chosen over
-  whitespace-fuzzy. F5 showed reasoning models *sometimes* return non-verbatim SEARCH (→ "could not
-  locate") or no blocks (→ "nothing to change"); a retry produced a matching block. It fails **safe**
-  (no data loss, misses surfaced). Revisit fuzzy/trimmed-line matching only if real use shows the misses
-  are frequent enough to annoy. See [[gotchas]].
+- Strip the heuristic guess-tables, or keep as offline fallback? (user-led)
+- The 3 ⚠ model ids stay unverified until keys exist (non-blocking; models.dev covers the rest).
 
 ## Recent context
-- Inquire is now a full inline-chat **editor**: instruction → edit blocks → in-editor B2 diff with
-  Accept/Reject. Completion is gone (slice #5); the span/whole-file rewrite path is gone (slice #8).
-- Pure, unit-testable logic stays **vscode-free in `catalog.ts`** (`parseEditBlocks`/`applyEditBlocks`
-  joined `diffLines`/`buildEditPrompt`/resolvers there); `extension.ts` reads editor state and renders.
-- **Uncommitted, NOT this slice:** `CLAUDE.md` has a pre-existing edit (guideline sections) from before
-  this session — kept out of the slice-#8 commit; commit separately if wanted.
+- **models.dev is the capability source** — keyed by base-URL match, NOT provider name (`.../zen/go/v1`
+  → `opencode-go`, `kilocode` → `kilo`). Local Ollama / Cline / Custom are absent → table/default. See
+  [[decisions]] + [[gotchas]].
+- Pattern intact: pure, unit-tested logic lives vscode-free in `catalog.ts`; `extension.ts` / `chatProvider.ts`
+  do the vscode/network glue. `modelsDev.ts` is the only network module (vscode-free).
 
 ## Related
 - [[overview]]
-- [[api]] — Inquire is the only surface; edits are SEARCH/REPLACE blocks reviewed via the B2 diff
-- [[decisions]] — 2026-06-17 edit-fidelity entry (edit blocks) + the slice-#8 build entry
-- [[gotchas]] — edit-blocks are flaky with reasoning models (fails safe); don't whole-file re-emit;
-  vscode-free `catalog.ts`
+- [[decisions]]
+- [[gotchas]]
+- [[api]]
