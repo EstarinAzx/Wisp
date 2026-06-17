@@ -2,7 +2,7 @@
   "name": "wisp",
   "displayName": "Wisp",
   "description": "Wisp: AI inline code edits (Inquire), backed by a catalog of OpenAI-compatible providers.",
-  "version": "0.0.8",
+  "version": "1.0.0",
   "publisher": "local",
   "private": true,
   "engines": {
