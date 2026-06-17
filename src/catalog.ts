@@ -179,6 +179,49 @@ export const diffLines = (before: string, after: string): DiffOp[] => {
   return ops;
 };
 
+// ----------------------------- LM chat-provider descriptors ----------------------------- //
+
+// A vscode-free mirror of vscode.LanguageModelChatInformation — the descriptor the native chat picker
+// renders one row from. Kept structural (not the vscode type) so this stays unit-testable; the
+// chat-provider glue assigns the array straight to LanguageModelChatInformation[] (shapes match).
+export type ChatModelInfo = {
+  id: string;
+  name: string;
+  family: string;
+  version: string;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  capabilities: Record<string, never>; // {} — no tool calling / image input in this surface
+};
+
+// Arbitrary OpenAI-compatible backends don't report their own limits, so advertise conservative caps.
+const DEFAULT_MAX_INPUT_TOKENS = 128_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
+
+// Build the descriptors Wisp advertises into VS Code's native model picker: one row per Provider that
+// is actually usable. Usable = has a key AND a resolvable model AND (for Custom only) a base URL — a
+// keyless / URL-less / model-less Provider can't serve a request, so it stays hidden rather than
+// appearing as a dead pick. id is the Provider id (the response glue maps it back to {baseUrl,key}).
+export const buildChatModelInfos = (
+  providers: Provider[],
+  state: { keyed: Record<string, boolean>; modelMap: Record<string, string>; customBaseUrl: string },
+): ChatModelInfo[] =>
+  providers.flatMap((p) => {
+    const model = resolveModel(state.modelMap, p);
+    // Custom has no hardcoded URL — without wisp.baseUrl there is nowhere to send the request.
+    const reachable = p.id !== CUSTOM_ID || state.customBaseUrl.trim() !== '';
+    if (!state.keyed[p.id] || !model || !reachable) return [];
+    return [{
+      id: p.id,
+      name: `${p.label} — ${model}`,
+      family: p.id,
+      version: '1',
+      maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      capabilities: {},
+    }];
+  });
+
 // ----------------------------- Migration ----------------------------- //
 
 // Decide what the one-time pre-catalog migration should do, given the current storage state. Returns

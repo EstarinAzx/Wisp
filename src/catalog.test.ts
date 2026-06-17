@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveModel, resolveBaseUrl, planLegacyMigration,
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
+  buildChatModelInfos,
   CUSTOM_ID, type Provider,
 } from './catalog';
 
@@ -207,6 +208,60 @@ describe('buildEditPrompt', () => {
     const [system] = buildEditPrompt({ instruction: 'x', languageId: 'js', context: '' });
     expect(system.content).toContain('SEARCH');
     expect(system.content).toContain('REPLACE');
+  });
+});
+
+describe('buildChatModelInfos', () => {
+  const zen = provider({ id: 'opencode-zen', label: 'OpenCode Zen', defaultModel: 'minimax-m3' });
+  const groq = provider({ id: 'groq', label: 'Groq', defaultModel: 'llama-3.3-70b-versatile' });
+  const custom = provider({ id: CUSTOM_ID, label: 'Custom', baseUrl: '', defaultModel: '' });
+
+  // Only providers with a usable key get advertised — a keyless backend would just 401, so it stays
+  // hidden from the native picker rather than appearing as a dead option.
+  it('advertises only providers that have a key', () => {
+    const infos = buildChatModelInfos([zen, groq], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '' });
+    expect(infos.map((i) => i.id)).toEqual(['opencode-zen']);
+  });
+
+  // The picker label is "<label> — <model>"; a remembered model wins over the native default.
+  it('names an entry "<label> — <model>" using the remembered model', () => {
+    const infos = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: { 'opencode-zen': 'gpt-4o-mini' }, customBaseUrl: '' });
+    expect(infos[0].name).toBe('OpenCode Zen — gpt-4o-mini');
+  });
+
+  it('falls back to the native default model in the name', () => {
+    const infos = buildChatModelInfos([groq], { keyed: { groq: true }, modelMap: {}, customBaseUrl: '' });
+    expect(infos[0].name).toBe('Groq — llama-3.3-70b-versatile');
+  });
+
+  // Custom has no hardcoded base URL — without wisp.baseUrl there is nowhere to send the request,
+  // so it must not be advertised even with a key and a model.
+  it('excludes Custom when it has a key and model but no base URL', () => {
+    const infos = buildChatModelInfos([custom], { keyed: { custom: true }, modelMap: { custom: 'my-model' }, customBaseUrl: '' });
+    expect(infos).toEqual([]);
+  });
+
+  it('includes Custom when key, model and base URL are all present', () => {
+    const infos = buildChatModelInfos([custom], { keyed: { custom: true }, modelMap: { custom: 'my-model' }, customBaseUrl: 'https://proxy.local/v1' });
+    expect(infos.map((i) => i.id)).toEqual([CUSTOM_ID]);
+    expect(infos[0].name).toBe('Custom — my-model');
+  });
+
+  // Custom's defaultModel is '' — with a key and base URL but no remembered model there is no id to
+  // advertise, so it is skipped (built-ins always have a non-empty default, so this only bites Custom).
+  it('excludes a keyed provider whose resolved model is empty', () => {
+    const infos = buildChatModelInfos([custom], { keyed: { custom: true }, modelMap: {}, customBaseUrl: 'https://proxy.local/v1' });
+    expect(infos).toEqual([]);
+  });
+
+  // The vscode LanguageModelChatInformation shape requires these fields; capabilities is the empty
+  // object (no tool calling / image input in this MVP).
+  it('fills the vscode-required descriptor fields', () => {
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '' });
+    expect(info).toMatchObject({ id: 'opencode-zen', family: 'opencode-zen', capabilities: {} });
+    expect(typeof info.version).toBe('string');
+    expect(info.maxInputTokens).toBeGreaterThan(0);
+    expect(info.maxOutputTokens).toBeGreaterThan(0);
   });
 });
 

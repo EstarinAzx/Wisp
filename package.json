@@ -6,7 +6,7 @@
   "publisher": "local",
   "private": true,
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.104.0"
   },
   "categories": [
     "Machine Learning",
@@ -17,6 +17,12 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "wisp",
+        "displayName": "Wisp"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -126,7 +132,7 @@
     "@preact/preset-vite": "^2.10.0",
     "@tailwindcss/vite": "^4.1.0",
     "@types/node": "^20.11.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.104.0",
     "preact": "^10.26.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.4.0",

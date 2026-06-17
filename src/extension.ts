@@ -23,6 +23,7 @@ import {
   Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, planLegacyMigration,
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
 } from './catalog';
+import { registerWispChatProvider } from './chatProvider';
 
 // ----------------------------- Constants ----------------------------- //
 
@@ -113,12 +114,26 @@ const activeModel = (): string =>
 // user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
 const activeBaseUrl = (): string => resolveBaseUrl(activeProvider(), cfg().get<string>('baseUrl') ?? '');
 
-// Key resolution for the Active Provider: its namespaced SecretStorage slot first, then the row's own
-// env var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings.
-const resolveApiKey = async (): Promise<string> => {
-  const p = activeProvider();
+// Key resolution for a given Provider: its namespaced SecretStorage slot first, then the row's own env
+// var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings. Takes
+// the Provider explicitly so the chat surface can resolve any catalog row, not only the Active one.
+const keyForProvider = async (p: Provider): Promise<string> => {
   const stored = await secrets.get(keySlot(p.id));
   return stored?.trim() || (p.apiKeyEnv ? process.env[p.apiKeyEnv] : '') || '';
+};
+
+// The Active Provider's key — Inquire's path. Thin delegate so there is one key-resolution rule.
+const resolveApiKey = (): Promise<string> => keyForProvider(activeProvider());
+
+// Build a fresh client for an arbitrary Provider (the chat surface picks per-request, so the Active
+// Provider's cachedClient doesn't apply). Returns undefined when the Provider has no key, or is Custom
+// with no base URL — i.e. nothing to send to. Construction is local (no network), so per-call is fine.
+const clientForProvider = async (p: Provider): Promise<OpenAI | undefined> => {
+  const key = await keyForProvider(p);
+  if (!key) return undefined;
+  const baseURL = resolveBaseUrl(p, cfg().get<string>('baseUrl') ?? '');
+  if (!baseURL) return undefined;
+  return new OpenAI({ apiKey: key, baseURL });
 };
 
 // Build (and cache) the client from the Active Provider's resolved {baseUrl, key}. Base URL is the
@@ -542,6 +557,16 @@ export const activate = (context: vscode.ExtensionContext): void => {
     removedDecoration,
     onDidChangeCodeLenses,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, editCodeLensProvider),
+    // Additional surface: expose the catalog's keyed Providers as models in VS Code's native chat /
+    // Ctrl+I picker. extension.ts owns key resolution; the provider module is pure vscode/openai glue.
+    registerWispChatProvider({
+      providers: PROVIDERS,
+      modelMap: () => globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {},
+      customBaseUrl: () => cfg().get<string>('baseUrl') ?? '',
+      keyFor: keyForProvider,
+      clientFor: clientForProvider,
+      log: (m) => output.appendLine(m),
+    }),
     // Keep derived state in sync when settings change out from under us.
     vscode.workspace.onDidChangeConfiguration((e) => {
       // Active Provider, its (Custom) base URL, or its mirrored model changed → rebuild the client.
