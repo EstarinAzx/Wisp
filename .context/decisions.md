@@ -1,7 +1,7 @@
 ---
 type: decisions
 project: wisp
-updated: 2026-06-16
+updated: 2026-06-17
 tags: [context, decisions]
 ---
 
@@ -229,6 +229,92 @@ the pure cores makes them genuinely unit-testable **without** `@vscode/test-elec
 chosen over the official VS Code test harness precisely because the logic under test is pure, so an
 Electron host is dead weight. Establishes the pattern: testable logic is vscode-free in `catalog.ts`.
 **Reversibility:** easy — but don't fold the pure logic back inline; that re-breaks testability (see [[gotchas]]).
+
+## 2026-06-17 — Scope pivot: remove Completion, evolve Inquire into an inline-chat editor
+
+**Decision:** Deprecate **Completion** (the always-on, `enabled`-gated ghost-text autocomplete) and
+evolve **Inquire** from a ghost-text Suggestion into a VS Code inline-chat-style **editor**: an
+instruction typed in a quick `showInputBox`, the selection (or current line) as the **target span**,
+the whole file as context, and the model's rewrite applied as a `WorkspaceEdit` replace that can add
+**and** delete lines, reviewed via accept/reject. Planned as 4 tracer slices (PRD **#3**; **#4** evolve
+Inquire B1 → **#5** remove Completion → **#6** inline diff B2 → **#7** bonus LM-provider). Design spec:
+`docs/superpowers/specs/2026-06-17-inline-chat-pivot-design.md`.
+
+**Why:** ghost text can only insert at the caret — it can never delete/rewrite; the user wants full
+add+delete control driven by an explicit prompt. Three constraints fixed the shape:
+- The **native Ctrl+I inline-chat widget is a proposed API** → unpublishable to the Marketplace. So we
+  build our own on **stable APIs** (`showInputBox` + `WorkspaceEdit` + `needsConfirmation` refactor-preview
+  for B1; `setDecorations` + `CodeLens` for the in-editor diff in B2). Prompt entry is a top-center input
+  box, **not** a floating in-editor widget (impossible on stable APIs).
+- **Inference stays on Wisp's own OpenAI-compatible client**, independent of `vscode.lm` and GitHub
+  Copilot — keeps Wisp provider-agnostic and its own product, not a Copilot model plug-in.
+- **Slice order is forced by entanglement:** Inquire has no output surface of its own — it stashes a
+  `pendingInquiry` the Completion `InlineCompletionItemProvider` returns via an early-return. Inquire must
+  get its own edit path (#4) **before** the provider is removed (#5), or #4 breaks. See [[gotchas]].
+- **Option A** (register as a VS Code Language Model Chat Provider so Wisp models appear in *native* inline
+  chat) is a **deferred, optional bonus (#7), HITL** — its BYOK gating is unresolved (may need Copilot
+  Business/Enterprise as of Apr 2026 vs docs saying no Copilot plan needed). Never the core.
+
+**Reversibility:** the product **direction** is a hard pivot (one-way once Completion code is deleted in
+#5). But as of this session nothing destructive is committed — only the spec + issues exist on branch
+`feat/inline-chat-pivot`; trivially reversible until #5 lands.
+
+## 2026-06-17 — Completion removed (slice #5 lands the pivot's one-way step)
+
+**Decision:** Ripped **Completion** end-to-end — Wisp is now **Inquire-only**. Gone: the
+`InlineCompletionItemProvider` + registration, `SYSTEM_PROMPT`, the prefix/suffix context
+(`buildContext`/`buildUserPrompt`), `stripPrefixOverlap`, the `delay`/debounce, the single-entry
+`lastResult` cache, the whole comment-line guard (`LINE_COMMENT`/`looksLikeCode`/`reindent`/
+`relocateAfterComment`), the now-inert `pendingInquiry` stash + provider early-return, the **`enabled`
+toggle** across every layer (`wisp.toggle` command, `setEnabled`, the status-bar disabled state, the
+panel checkbox + its **Muted** dressing), and the Completion-only settings (`enabled`/`debounceMs`/
+`maxPrefixChars`/`maxSuffixChars`). `catalog.ts` lost `buildInquiryContent` + `INQUIRE_CONTEXT_LIMIT`
+(dead since #4) and their tests. `CONTEXT.md` retired Completion/Suggestion/enabled/Muted/
+selection-as-prompt. The status bar collapsed to **thinking / error / ready** and is no longer
+clickable (no toggle to bind). Verified: `npm test` 18/18, `npm run compile` clean, F5 eyeball PASSED.
+**Why:** Inquire got its own edit surface in #4, so Completion was the last thing pinning the
+inline-completion provider in place; removing it is what the 2026-06-17 pivot called the "one-way"
+step. `stripThink`/`stripFences` survive in `catalog.ts` (Inquire's `extractEditText` composes them).
+**Reversibility:** one-way — Completion is deleted, not flag-gated. Reverting means re-implementing it.
+
+## 2026-06-17 — Inquire edit fidelity: SEARCH/REPLACE edit blocks (supersedes whole-file rewrite)
+
+**Decision:** Inquire will ask the model for targeted **SEARCH/REPLACE edit blocks**, not a span/whole-
+file rewrite. The model gets whole-file context + the instruction and returns one or more blocks (exact
+original snippet → replacement); Wisp locates each SEARCH text in the document, applies the replacement,
+then renders the result through the **existing B2 inline diff** (`diffLines` + decorations + Accept/
+Reject). New pure core (a block parser + an apply planner) in `catalog.ts`, TDD'd. Planned as a **new
+slice (#8)**, built **before** the deferred bonus (#7).
+**Why:** a mid-session experiment made no-selection Inquire target the **whole file** so the model could
+edit anywhere (caret-agnostic — the user's ask). It worked sometimes, but the model frequently re-emitted
+the 100+ line file with unrelated lines dropped/reformatted; the B2 diff faithfully showed the damage and
+**Accept would have applied it → data-loss risk**. Edit blocks give the same "edit anywhere" capability
+**without** re-emitting untouched code: only changed regions are emitted, so untouched code is
+structurally preserved, diffs stay small, latency/tokens drop. Standard robust approach (Aider/Cursor).
+The whole-file span change was **reverted**; B2 ships on the selection/current-line span (its documented
+scope). `diffLines` itself was unaffected (it correctly showed a minimal diff of a mangled reply).
+**Reversibility:** easy — the block format + parser are additive. Don't reintroduce whole-file re-emit as
+the edit path; it's the confirmed mangling / data-loss vector.
+
+## 2026-06-17 — Edit blocks built (slice #8): exact match, fails safe; extractEditText retired
+
+**Decision:** Built the SEARCH/REPLACE path. `parseEditBlocks` (Aider markers, strips `<think>`,
+CRLF→LF, ignores surrounding fences/prose, empty REPLACE = delete) + `applyEditBlocks` (EOL-agnostic
+first-occurrence locate+splice, returns the applied text + a `notFound` list, empty-search guarded) are
+new pure cores in `catalog.ts`, TDD'd (35/35). `buildEditPrompt` lost its `selectionText` arg and got a
+block-eliciting `EDIT_SYSTEM_PROMPT`. `inquire` now parses → applies → diffs the **whole document**
+before/after through the unchanged B2 `renderInlineDiff`. **Match policy is exact** (EOL-agnostic only),
+**not** whitespace-fuzzy. `extractEditText` + `stripFences` were **removed** (orphaned by the switch to
+`parseEditBlocks`); `stripThink` survives (reused) — this **supersedes** the slice-#5 note that said
+"stripThink/stripFences survive… extractEditText composes them."
+**Why exact + fails-safe:** a SEARCH that isn't byte-present is recorded in `notFound` and skipped, never
+force-matched — so a bad/paraphrased block can't corrupt the file; the user reviews what landed via the
+diff. Whitespace-fuzzy matching was deferred because it adds a false-match (wrong-region) risk class for
+marginal gain. The whole-document diff **span** is safe (unlike the reverted whole-file *re-emit*):
+`applyEditBlocks` copies untouched code verbatim, so `diffLines` emits a minimal diff.
+**Reversibility:** easy. The deferred fork (add trimmed-line/fuzzy matching) stays open — take it only if
+real use shows verbatim misses are frequent (see [[gotchas]]). Don't re-add `extractEditText`/whole-file
+re-emit.
 
 ## Related
 - [[overview]]

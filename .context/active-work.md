@@ -1,66 +1,84 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-16
+updated: 2026-06-17
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-16 by Opus 4.8 (auto)_
-_On `main` @ `bdcf780` (PR #2 merge). Backlog item 3 shipped; `test/pure-helpers` + `feat/multi-provider-catalog` merged and pruned._
+_Last updated: 2026-06-17 by Opus 4.8 (auto)_
+_At commit: uncommitted (slice #8 staged for commit on `feat/inline-chat-pivot`)_
 
 ## Current focus
-**Pure helpers extracted and unit-tested (backlog item 3 — DONE).** The vscode-coupled resolvers were
-pulled into a new vscode-free module and put under test with Vitest — the project's first test runner.
-Next session is **user-led**: they want to discuss a **new scope addition** (TBD — they bring it).
+**Slice #8 DONE — Inquire edits via SEARCH/REPLACE edit blocks.** The model gets the whole file +
+the instruction and returns Aider-style edit blocks (`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE`)
+instead of re-emitting a span/whole file. Wisp locates each SEARCH verbatim, splices in the REPLACE,
+and renders the before/after through the **existing B2 inline diff** (red/green decorations +
+Accept/Reject CodeLenses). This delivers caret-agnostic "edit anywhere" without the whole-file re-emit
+that mangled untouched code. Next: **slice #7** (deferred bonus — register Wisp as a VS Code LM chat
+provider), still gated on the BYOK/Copilot-plan question.
 
 ## State
 - **In flight:** nothing.
-- **Done this session:**
-  - New `src/catalog.ts` (imports nothing — deliberately vscode-free): `resolveModel`,
-    `resolveBaseUrl`, `buildInquiryContent` (reshaped to take `{ text, languageId, offset }`, not a
-    `vscode.TextDocument`), and `planLegacyMigration` (a pure plan the applier executes).
-  - New `src/catalog.test.ts` — **13 Vitest tests**, all green (limit boundary, windowing bounds,
-    migration idempotency, empty-string-model fallback).
-  - `src/extension.ts` rewired: thin wrappers delegate to the pure cores, behaviour-identical. Dropped
-    now-unused `buildContext` prefix/suffix params (orphaned by the inquiry change).
-  - **Verified ollama-cloud** `gpt-oss:120b` works → dropped its ⚠ in `PROVIDERS` (user-confirmed).
-  - Tooling: `+vitest` devDep, `test: vitest run` script, `tsconfig.json` excludes `src/**/*.test.ts`
-    from the extension build.
-  - **Verification:** `npm test` 13/13 green; `npm run compile` clean (extension + webview + vite).
-    NOT F5/eyeball-tested (behaviour-identical refactor; user said land it).
+- **Done this session (slice #8 / edit blocks):**
+  - `src/catalog.ts`: `parseEditBlocks(raw)` → `{ search, replace }[]` (Aider markers via one regex;
+    strips `<think>` first, normalizes CRLF→LF, ignores surrounding prose/```` ``` ```` fences; empty
+    REPLACE = deletion). `applyEditBlocks(documentText, blocks)` → `{ text, notFound }` — EOL-agnostic
+    first-occurrence locate+splice, applies each block against the running result, records misses
+    (empty search guarded → never injects at position 0). Output is LF; the caller rejoins with the
+    document EOL (same contract as `diffLines`). New `EditBlock` / `EditPlan` types.
+  - New block-eliciting `EDIT_SYSTEM_PROMPT`; `buildEditPrompt` **dropped `selectionText`** (the model
+    edits anywhere via blocks, no target span).
+  - **Removed** `extractEditText` + `stripFences` (orphaned — `parseEditBlocks` superseded them);
+    `stripThink` kept and reused by `parseEditBlocks`.
+  - `src/catalog.test.ts`: +`parseEditBlocks` (9) +`applyEditBlocks` (8) suites, reworked
+    `buildEditPrompt` tests for the new signature, dropped `extractEditText` tests. **35/35.**
+  - `src/extension.ts` `inquire`: `parseEditBlocks(reply)` → `applyEditBlocks(original)` → whole-doc
+    span through the **unchanged** `renderInlineDiff`. Guards: 0 blocks → "nothing to change";
+    all-not-found → "could not locate the text to edit"; no-op (applied == original) → "no change";
+    partial miss → warn "N of M edits could not be located". The whole-doc diff span is **safe** here
+    (the applied result preserves untouched code verbatim — NOT the re-emit the gotcha warns about).
+  - **Debug instrumentation** (raw-reply + miss/trimmedMatch logging) was added to diagnose the F5
+    misses, then **removed** before commit.
+  - **Verification:** `npm test` **35/35** · `npm run compile` **clean** · F5 eyeball PASSED (block
+    edit applies, minimal diff renders, Accept/Reject work).
 - **Blocked:** nothing.
 
 ## Pick up here
-**Primary (user-led): discuss the new scope addition** the user is bringing — undefined as of this
-handoff. Start with `superpowers:brainstorming`; if it firms up, `/preset init` or `to-prd`/`to-issues`.
-
-Remaining backlog (lower priority, carried forward):
-1. **Verify the 3 still-⚠ `defaultModel`s** once keys exist — `ollama` (`qwen2.5-coder`), `kilocode` +
-   `cline` (`anthropic/claude-3.5-sonnet`). Fix in `PROVIDERS` (`src/extension.ts`). (ollama-cloud now
-   verified, dropped from this list.)
-2. **README** — document `wisp.provider`, the Provider catalog, reworded `wisp.baseUrl` ("Custom only").
-
-Carried-forward: try a snappier default Zen model (`deepseek-v4-flash` / `kimi-k2.6`).
+**Slice #7 — register Wisp as a VS Code Language Model Chat Provider (deferred bonus, HITL).**
+- **Resolve first (open question):** the Option-A BYOK gating — may need GitHub Copilot
+  Business/Enterprise (as of Apr 2026) vs docs saying no Copilot plan needed. This is the blocker;
+  settle it before building. See [[decisions]] 2026-06-17 pivot entry.
+- Inference stays on Wisp's own OpenAI-compatible client (provider-agnostic) — #7 only adds a *surface*
+  (Wisp models appearing in native inline chat), never replaces the client.
+- It's the LAST planned slice of the pivot; everything core (Inquire inline-chat editor + edit blocks)
+  is shipped.
 
 ## Skills for next session
-- `superpowers:brainstorming` — for the new scope addition the user brings.
-- `superpowers:test-driven-development` — the Vitest harness now exists (`npm test`); TDD any new pure logic into `src/catalog.ts`.
+- `superpowers:test-driven-development` — keep any new pure core (e.g. a chat-provider adapter) red-green.
+- `superpowers:systematic-debugging` — the edit-block F5 misses were chased this way; reuse it for #7's
+  provider-registration quirks.
 
 ## Open questions
-- **The new scope addition is undefined** — the user defines it next session.
-- The 3 remaining ⚠ model ids stay unverified until keys exist (non-blocking).
+- **Slice #7 (Option A) gating** — BYOK / LM-chat-provider Copilot-plan requirement (above). Unresolved.
+- **Edit-block match fidelity (deferred fork)** — matching is **exact** (EOL-agnostic only), chosen over
+  whitespace-fuzzy. F5 showed reasoning models *sometimes* return non-verbatim SEARCH (→ "could not
+  locate") or no blocks (→ "nothing to change"); a retry produced a matching block. It fails **safe**
+  (no data loss, misses surfaced). Revisit fuzzy/trimmed-line matching only if real use shows the misses
+  are frequent enough to annoy. See [[gotchas]].
 
 ## Recent context
-- `test/pure-helpers` (PR #2) and `feat/multi-provider-catalog` (PR #1) both merged to `main` and pruned (local + remote).
-- **Pattern established:** pure, unit-testable logic lives vscode-free in `src/catalog.ts`; `extension.ts`
-  reads VS Code state and delegates. Tests can't import `extension.ts` (it imports `vscode`). See [[gotchas]].
-- **No model-id transform anywhere** — each row's `defaultModel` is the Provider's native form; never
-  re-add the `opencode/` prefix (it 401s Zen).
+- Inquire is now a full inline-chat **editor**: instruction → edit blocks → in-editor B2 diff with
+  Accept/Reject. Completion is gone (slice #5); the span/whole-file rewrite path is gone (slice #8).
+- Pure, unit-testable logic stays **vscode-free in `catalog.ts`** (`parseEditBlocks`/`applyEditBlocks`
+  joined `diffLines`/`buildEditPrompt`/resolvers there); `extension.ts` reads editor state and renders.
+- **Uncommitted, NOT this slice:** `CLAUDE.md` has a pre-existing edit (guideline sections) from before
+  this session — kept out of the slice-#8 commit; commit separately if wanted.
 
 ## Related
 - [[overview]]
-- [[api]]
-- [[decisions]]
-- [[gotchas]]
+- [[api]] — Inquire is the only surface; edits are SEARCH/REPLACE blocks reviewed via the B2 diff
+- [[decisions]] — 2026-06-17 edit-fidelity entry (edit blocks) + the slice-#8 build entry
+- [[gotchas]] — edit-blocks are flaky with reasoning models (fails safe); don't whole-file re-emit;
+  vscode-free `catalog.ts`
