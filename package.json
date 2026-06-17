@@ -57,11 +57,19 @@
       "editor/context": [
         {
           "command": "wisp.inquire",
-          "when": "editorHasSelection",
+          "when": "editorTextFocus",
           "group": "1_modification"
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "wisp.inquire",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i",
+        "when": "editorTextFocus"
+      }
+    ],
     "configuration": {
       "title": "Wisp",
       "properties": {

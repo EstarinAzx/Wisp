@@ -1,7 +1,7 @@
 ---
 type: api
 project: wisp
-updated: 2026-06-16
+updated: 2026-06-17
 tags: [context, api, vscode]
 ---
 
@@ -12,7 +12,7 @@ The project's surface is a VS Code extension: an inline-completion provider, com
 ## Inline completion provider
 - Registered for all files (`{ pattern: '**' }`) via `registerInlineCompletionItemProvider` in `src/extension.ts`.
 - Behavior: debounced (cancellation-token based), gated, single-entry cached, non-streaming chat request → cleaned insertion at the caret. See [[decisions]] and [[gotchas]].
-- **Inquire** reuses this same provider as its answer surface: an early-return at the top of `provideInlineCompletionItems` (before every gate) hands back a stashed `pendingInquiry` when the caret matches, then clears it — so Inquire works even with `enabled: false` and never touches the completion cache. See the `inquire` command and [[decisions]] (2026-06-15).
+- **Inquire no longer uses this provider (slice #4, 2026-06-17).** It has its own edit path now (see the `inquire` command below). The `pendingInquiry` stash + the early-return at the top of `provideInlineCompletionItems` that read it are **inert** — nothing sets `pendingInquiry` anymore; both are removed in slice #5 when Completion goes. See [[decisions]] (2026-06-17).
 
 ## Commands
 | Command id | Title | What it does |
@@ -20,7 +20,7 @@ The project's surface is a VS Code extension: an inline-completion provider, com
 | `wisp.setApiKey` | Wisp: Set API Key | Prompt + store key in SecretStorage; invalidate cached client. |
 | `wisp.listModels` | Wisp: List / Choose Model | `GET /models` → quick-pick → write `model` setting. |
 | `wisp.toggle` | Wisp: Toggle Autocomplete | Flip `enabled`; also the status-bar click action. |
-| `wisp.inquire` | Wisp: Inquire | Selection = prompt, whole file = context → insertable code as ghost text **after** the selection (append, never replace). Cancellable `withProgress`; code-only. In the `editor/context` menu (`when: editorHasSelection`) + palette. |
+| `wisp.inquire` | Wisp: Inquire | **Inline-chat edit (slice #4).** `showInputBox` instruction → target span = selection (or current line if none), whole file = context → `buildEditPrompt`/`extractEditText` → `WorkspaceEdit` replace over the span (add **and** delete) with `needsConfirmation` → native refactor-preview accept/reject. Cancellable `withProgress`. Keybinding **`Ctrl+Shift+I`** (rebindable; `Ctrl+I` is Copilot's). In the `editor/context` menu (`when: editorTextFocus`) + palette. |
 
 ## Settings (`wisp.*`)
 `enabled` (bool), `provider` (str, default `opencode-zen`, **`scope: machine`** — the Active Provider id; selecting one selects where the bearer key is sent, so it must not be workspace-overridable; unknown → falls back to `opencode-zen`), `baseUrl` (str, default `https://opencode.ai/zen/go/v1`, **`scope: machine`** — used **only** when the Active Provider is `custom`; built-ins ignore it and use their hardcoded catalog URL), `model` (str, default **bare** `minimax-m3` — the prefixed form is rejected, see [[gotchas]]; now a **mirror** of the Active Provider's model, sourced from globalState), `debounceMs` (300), `maxTokens` (0 = uncapped), `temperature` (0.1), `maxPrefixChars` (2000), `maxSuffixChars` (1000). No `apiKey` setting — key is SecretStorage/env only. Panel and commands write to the scope that already defines the value (`targetFor()`), not blindly Global.

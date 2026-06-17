@@ -3,6 +3,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveModel, resolveBaseUrl, buildInquiryContent, planLegacyMigration,
+  buildEditPrompt, extractEditText,
   CUSTOM_ID, INQUIRE_CONTEXT_LIMIT, type Provider,
 } from './catalog';
 
@@ -92,5 +93,58 @@ describe('planLegacyMigration', () => {
   it('omits the model when no legacy model is remembered', () => {
     expect(planLegacyMigration({ zenKeyPresent: false, legacyKey: 'sk-old', legacyModel: undefined }))
       .toEqual({ storeZenKey: 'sk-old' });
+  });
+});
+
+describe('extractEditText', () => {
+  // Bare code (the happy path) passes straight through.
+  it('passes bare code through unchanged', () => {
+    expect(extractEditText('const x = 1')).toBe('const x = 1');
+  });
+
+  // A model that wraps its reply in a ``` fence despite instructions → unwrap it.
+  it('strips a wrapping ``` fence', () => {
+    expect(extractEditText('```ts\nconst x = 1\n```')).toBe('const x = 1');
+  });
+
+  // Reasoning models emit a <think>…</think> block before the answer → drop it.
+  it('strips a <think> reasoning block', () => {
+    expect(extractEditText('<think>plan the change</think>const x = 1')).toBe('const x = 1');
+  });
+
+  // Unterminated <think> = the token budget ran out mid-thought, no answer yet → insert nothing.
+  it('returns empty string for an unterminated <think>', () => {
+    expect(extractEditText('<think>still thinking')).toBe('');
+  });
+});
+
+describe('buildEditPrompt', () => {
+  // The request is a system message (the edit rules) then a user message (the work).
+  it('returns a system message then a user message', () => {
+    const msgs = buildEditPrompt({ selectionText: 'a', instruction: 'b', languageId: 'ts', context: 'c' });
+    expect(msgs.map((m) => m.role)).toEqual(['system', 'user']);
+  });
+
+  // The user message carries the four inputs the model needs to do the edit.
+  it('puts language, context, target span and instruction in the user message', () => {
+    const [, user] = buildEditPrompt({
+      selectionText: 'const x = 1', instruction: 'make it 2', languageId: 'typescript', context: 'const x = 1\n',
+    });
+    expect(user.content).toContain('typescript');
+    expect(user.content).toContain('const x = 1');
+    expect(user.content).toContain('make it 2');
+  });
+
+  // The system message must constrain the model to return ONLY the rewritten span.
+  it('tells the model to return only the rewritten span', () => {
+    const [system] = buildEditPrompt({ selectionText: '', instruction: 'x', languageId: 'js', context: '' });
+    expect(system.content.toLowerCase()).toContain('only');
+  });
+
+  // Empty span (no selection → a blank current line) still produces a valid two-message request.
+  it('handles an empty target span', () => {
+    const msgs = buildEditPrompt({ selectionText: '', instruction: 'add a header', languageId: 'md', context: '' });
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1].content).toContain('add a header');
   });
 });

@@ -26,7 +26,8 @@ import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvider';
 import {
-  Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, buildInquiryContent, planLegacyMigration,
+  Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, planLegacyMigration,
+  buildEditPrompt, extractEditText, stripThink, stripFences,
 } from './catalog';
 
 // ----------------------------- Constants ----------------------------- //
@@ -53,16 +54,6 @@ const SYSTEM_PROMPT =
   'statement with nothing after it — begin your output with a newline so the code starts on its ' +
   'own line, and never continue or extend a comment. ' +
   'Return an empty string if nothing should be inserted.';
-
-// Inquire (manual, whole-file): the selection is the instruction, the whole file is the context,
-// and the answer is insertable code only — never prose, so it can live in the same ghost-text surface.
-const INQUIRE_SYSTEM_PROMPT =
-  'You are a coding assistant inside a code editor. ' +
-  'You are given the full contents of a file and a block of lines the user selected as an instruction. ' +
-  'Implement exactly what the selected lines ask for. ' +
-  'Return ONLY the code to insert immediately after the selection — no explanation, no prose, no markdown fences. ' +
-  'Match the file’s existing indentation and style. ' +
-  'Return an empty string if there is nothing to add.';
 
 // ----------------------------- Provider catalog ----------------------------- //
 
@@ -184,32 +175,6 @@ const buildContext = (
 
 const buildUserPrompt = (languageId: string, prefix: string, suffix: string): string =>
   `Language: ${languageId}\n\n${prefix}<CURSOR>${suffix}`;
-
-// Inquire's user message. Reads the file text + caret offset off the VS Code document, then hands
-// the pure builder the whole-file-vs-windowed slicing decision — see buildInquiryContent in catalog.
-const buildInquiryPrompt = (
-  document: vscode.TextDocument,
-  caret: vscode.Position,
-  selectionText: string,
-): { content: string; truncated: boolean } =>
-  buildInquiryContent(
-    { text: document.getText(), languageId: document.languageId, offset: document.offsetAt(caret) },
-    selectionText,
-  );
-
-// Reasoning models (e.g. minimax-m3) emit their chain-of-thought inline as a <think>…</think>
-// block before the real completion — strip it so the ghost text is the answer, not the thinking.
-// An unterminated <think> means the token budget ran out mid-thought (no answer yet) → insert nothing.
-const stripThink = (text: string): string => {
-  if (/<think>/i.test(text) && !/<\/think>/i.test(text)) return '';
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, '');
-};
-
-// Strip a wrapping ``` fence if the model added one despite instructions.
-const stripFences = (text: string): string => {
-  const m = text.match(/^```[\w-]*\r?\n([\s\S]*?)\r?\n?```$/);
-  return m ? m[1] : text;
-};
 
 // Trim the longest suffix of `prefix` that the suggestion repeats at its head. Chat models often
 // echo the current line ("const x = " → "const x = 42"); without this the ghost text doubles it.
@@ -569,16 +534,32 @@ const listModels = async (): Promise<void> => {
 // Flip the enabled flag (also bound to the status-bar click).
 const toggle = (): Promise<void> => setEnabled(!cfg().get<boolean>('enabled', true));
 
-// Inquire: select lines → the selection is the prompt, the whole file is context → insertable code
-// as ghost text after the selection (append, never replace). Works even when completion is disabled.
+// Inquire: type an instruction → the AI rewrites the target span (the selection, or the current line
+// when nothing is selected) over the whole-file context. Applied as a confirmable WorkspaceEdit, so
+// VS Code's native refactor-preview shows the diff and the user accepts/rejects. One replace covers
+// both add and delete. No longer routes through the inline-completion provider (no pendingInquiry).
 const inquire = async (): Promise<void> => {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  if (editor.selection.isEmpty) {
-    // Only reachable via the palette — the right-click item is gated on editorHasSelection.
-    vscode.window.showWarningMessage('Select the lines to inquire about.');
+
+  const document = editor.document;
+  // Target span = the selection, or the whole current line when there is no selection.
+  const span = editor.selection.isEmpty
+    ? document.lineAt(editor.selection.active.line).range
+    : new vscode.Range(editor.selection.start, editor.selection.end);
+  const selectionText = document.getText(span);
+
+  const instruction = await vscode.window.showInputBox({
+    prompt: 'Wisp: describe the edit',
+    placeHolder: 'e.g. make findBy reject a null predicate',
+    ignoreFocusOut: true,
+  });
+  if (instruction === undefined) return; // user cancelled the input box
+  if (!instruction.trim()) {
+    vscode.window.showWarningMessage('Wisp: no instruction given.');
     return;
   }
+
   if (!(await resolveApiKey())) {
     vscode.window.showWarningMessage("Set your API key first (command: 'Wisp: Set API Key').");
     return;
@@ -586,45 +567,36 @@ const inquire = async (): Promise<void> => {
   const client = await getClient();
   if (!client) return;
 
-  const document = editor.document;
-  const caret = editor.selection.end; // collapsed caret = end of selection; code is appended here
-  const selectionText = document.getText(editor.selection);
-  const { content, truncated } = buildInquiryPrompt(document, caret, selectionText);
-  if (truncated) vscode.window.showInformationMessage('Wisp: file too big — used nearby context.');
-
   const model = activeModel();
+  const messages = buildEditPrompt({
+    selectionText, instruction, languageId: document.languageId, context: document.getText(),
+  });
+
   // Bridge the progress notification's Cancel to an AbortController so it also kills the HTTP call.
   const controller = new AbortController();
   enterInFlight();
   const started = Date.now();
-  let text = '';
+  let replacement = '';
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Wisp: inquiring…', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'Wisp: editing…', cancellable: true },
       async (_progress, token) => {
         token.onCancellationRequested(() => controller.abort());
         const maxTokens = cfg().get<number>('maxTokens') ?? 0;
         const res = await client.chat.completions.create(
           {
             model,
-            messages: [
-              { role: 'system', content: INQUIRE_SYSTEM_PROMPT },
-              { role: 'user', content },
-            ],
+            messages,
             ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
             temperature: cfg().get<number>('temperature') ?? 0.1,
           },
           { signal: controller.signal },
         );
-        // Code only: strip reasoning + fences, then push code off a selected comment line onto its own.
-        const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
-        text = relocateAfterComment(document, caret, stripFences(stripThink(res.choices[0]?.message?.content ?? '')), eol);
+        replacement = extractEditText(res.choices[0]?.message?.content ?? '');
       },
     );
     lastError = false;
-    output.appendLine(
-      `inquire ${model} ${Date.now() - started}ms ${text.length}c ctx=${content.length}c${truncated ? ' (windowed)' : ' (whole-file)'}`,
-    );
+    output.appendLine(`inquire ${model} ${Date.now() - started}ms ${replacement.length}c`);
   } catch (err) {
     // Cancelling via the notification is normal (aborts); only surface real failures.
     if (!controller.signal.aborted) {
@@ -637,16 +609,20 @@ const inquire = async (): Promise<void> => {
     exitInFlight();
   }
 
-  if (!text.trim()) {
-    vscode.window.showInformationMessage('Wisp: nothing to insert.');
+  // Nothing came back, or the model echoed the span verbatim → no edit to offer.
+  if (!replacement.trim()) {
+    vscode.window.showInformationMessage('Wisp: nothing to change.');
+    return;
+  }
+  if (replacement === selectionText) {
+    vscode.window.showInformationMessage('Wisp: no change suggested.');
     return;
   }
 
-  // Inline ghost text will not render while a selection is active → collapse to the caret, stash the
-  // result keyed to that exact position, then ask VS Code to query the inline provider.
-  editor.selection = new vscode.Selection(caret, caret);
-  pendingInquiry = { uri: document.uri.toString(), line: caret.line, character: caret.character, text };
-  await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+  // needsConfirmation routes the replace through VS Code's native refactor-preview → accept/reject.
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(document.uri, span, replacement, { needsConfirmation: true, label: 'Wisp: apply edit' });
+  await vscode.workspace.applyEdit(edit);
 };
 
 // ----------------------------- Activation ----------------------------- //
