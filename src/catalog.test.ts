@@ -264,6 +264,21 @@ describe('buildChatModelInfos', () => {
     expect(info.maxInputTokens).toBeGreaterThan(0);
     expect(info.maxOutputTokens).toBeGreaterThan(0);
   });
+
+  // A Provider can override the conservative default context/output caps for its default model.
+  it('uses per-Provider token overrides when present', () => {
+    const big = provider({ id: 'mistral', label: 'Mistral', defaultModel: 'codestral', maxInputTokens: 256_000, maxOutputTokens: 8_192 });
+    const [info] = buildChatModelInfos([big], { keyed: { mistral: true }, modelMap: {}, customBaseUrl: '' });
+    expect(info.maxInputTokens).toBe(256_000);
+    expect(info.maxOutputTokens).toBe(8_192);
+  });
+
+  // Vision is opt-in per Provider (its default model must support image input); others stay text-only.
+  it('advertises imageInput only for vision Providers', () => {
+    const seeing = provider({ id: 'openai', label: 'OpenAI', defaultModel: 'gpt-4o-mini', vision: true });
+    const [info] = buildChatModelInfos([seeing], { keyed: { openai: true }, modelMap: {}, customBaseUrl: '' });
+    expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
 });
 
 describe('buildOpenAiChatMessages', () => {
@@ -304,6 +319,19 @@ describe('buildOpenAiChatMessages', () => {
       { role: 'user', text: '', toolCalls: [], toolResults: [{ callId: 'c1', content: 'body' }] },
     ]);
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+  });
+
+  // An attached image turns the user content into OpenAI's multimodal array (text part + image_url
+  // data URI). Without images the content stays a plain string (covered above).
+  it('builds a multimodal user message when the turn carries an image', () => {
+    const turn = { role: 'user' as const, text: 'what is this', toolCalls: [], toolResults: [], images: [{ mimeType: 'image/png', dataBase64: 'AAAA' }] };
+    expect(buildOpenAiChatMessages([turn])).toEqual([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+      ],
+    }]);
   });
 });
 

@@ -19,6 +19,11 @@ export type Provider = {
   baseUrl: string;       // hardcoded OpenAI-compatible base URL ('' for Custom — comes from settings)
   defaultModel: string;  // native-format model id used when the Provider has none remembered
   apiKeyEnv: string;     // env-var fallback for the key ('' = none, e.g. local Ollama)
+  // Chat-surface descriptor hints, all keyed to the row's DEFAULT model (approximate if the user
+  // switches model). Omitted → the conservative DEFAULT_MAX_* constants and no vision.
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  vision?: boolean;      // default model accepts image input → advertise imageInput + forward images
 };
 
 // ----------------------------- Constants ----------------------------- //
@@ -216,11 +221,12 @@ export const buildChatModelInfos = (
       name: `${p.label} — ${model}`,
       family: p.id,
       version: '1',
-      maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
-      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      maxInputTokens: p.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS,
+      maxOutputTokens: p.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       // Advertise tool calling so the model is selectable in agent/edit/Ctrl+I — those pickers hide
       // models that don't declare it. The response glue forwards the tools and emits tool-call parts.
-      capabilities: { toolCalling: true },
+      // imageInput only for vision Providers (whose default model accepts images, forwarded as data URIs).
+      capabilities: { toolCalling: true, ...(p.vision ? { imageInput: true } : {}) },
     }];
   });
 
@@ -241,25 +247,32 @@ export const toOpenAiTools = (tools: ToolSpec[]): OAToolDef[] =>
     function: { name: t.name, description: t.description, parameters: (t.inputSchema as Record<string, unknown>) ?? {} },
   }));
 
-// One chat turn flattened to plain data: its text, any tool calls it made (assistant turns), and any
-// tool results it carries (user turns). chatProvider.ts builds these from the vscode message parts.
+// One chat turn flattened to plain data: its text, any tool calls it made (assistant turns), any tool
+// results it carries (user turns), and any attached images (user turns). chatProvider.ts builds these
+// from the vscode message parts; images is optional (most turns have none).
 export type NormalizedTurn = {
   role: 'user' | 'assistant';
   text: string;
   toolCalls: { id: string; name: string; argsJson: string }[];
   toolResults: { callId: string; content: string }[];
+  images?: { mimeType: string; dataBase64: string }[];
 };
 
-// One OpenAI chat message. Assistant turns may carry tool_calls; a tool result is its own 'tool'
+// One OpenAI message-content part for a multimodal (vision) user message.
+type OAContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
+// One OpenAI chat message. A user message is a plain string unless it has images, then it is the
+// multimodal content array. Assistant turns may carry tool_calls; a tool result is its own 'tool'
 // message keyed by the call id. Hand-rolled (catalog imports nothing) — structurally the SDK's param.
 export type OAChatMessage =
-  | { role: 'user'; content: string }
+  | { role: 'user'; content: string | OAContentPart[] }
   | { role: 'assistant'; content: string; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
   | { role: 'tool'; tool_call_id: string; content: string };
 
 // Flatten the normalized turns into the OpenAI message sequence. A user turn's tool results expand into
 // standalone 'tool' messages (emitted before any user text so the assistant(tool_calls)→tool ordering
-// the API requires is preserved); a user turn with only tool results yields no empty user message.
+// the API requires is preserved); a user turn with only tool results yields no empty user message. An
+// image-bearing user turn becomes a multimodal content array (text part + image_url data URIs).
 export const buildOpenAiChatMessages = (turns: NormalizedTurn[]): OAChatMessage[] =>
   turns.flatMap((turn) => {
     if (turn.role === 'assistant') {
@@ -269,9 +282,16 @@ export const buildOpenAiChatMessages = (turns: NormalizedTurn[]): OAChatMessage[
         : { role: 'assistant' as const, content: turn.text }];
     }
     const toolMsgs: OAChatMessage[] = turn.toolResults.map((r) => ({ role: 'tool', tool_call_id: r.callId, content: r.content }));
-    // A bare tool-result turn carries no user prose, so don't emit an empty user message for it.
-    if (turn.toolResults.length && !turn.text) return toolMsgs;
-    return [...toolMsgs, { role: 'user' as const, content: turn.text }];
+    const images = turn.images ?? [];
+    // A bare tool-result turn carries no user prose or image, so don't emit an empty user message.
+    if (turn.toolResults.length && !turn.text && !images.length) return toolMsgs;
+    const content: string | OAContentPart[] = images.length
+      ? [
+          ...(turn.text ? [{ type: 'text' as const, text: turn.text }] : []),
+          ...images.map((img) => ({ type: 'image_url' as const, image_url: { url: `data:${img.mimeType};base64,${img.dataBase64}` } })),
+        ]
+      : turn.text;
+    return [...toolMsgs, { role: 'user' as const, content }];
   });
 
 // OpenAI streams a tool call across chunks: id + name land on the first delta for an index, the

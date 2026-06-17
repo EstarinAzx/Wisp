@@ -57,12 +57,14 @@ const toolResultText = (parts: readonly unknown[]): string =>
 const normalizeTurn = (m: vscode.LanguageModelChatRequestMessage): NormalizedTurn => {
   const turn: NormalizedTurn = {
     role: m.role === vscode.LanguageModelChatMessageRole.Assistant ? 'assistant' : 'user',
-    text: '', toolCalls: [], toolResults: [],
+    text: '', toolCalls: [], toolResults: [], images: [],
   };
   for (const part of m.content) {
     if (part instanceof vscode.LanguageModelTextPart) turn.text += part.value;
     else if (part instanceof vscode.LanguageModelToolCallPart) turn.toolCalls.push({ id: part.callId, name: part.name, argsJson: JSON.stringify(part.input) });
     else if (part instanceof vscode.LanguageModelToolResultPart) turn.toolResults.push({ callId: part.callId, content: toolResultText(part.content) });
+    // Image attachments → base64 for the OpenAI data-URI; only image mime types are forwarded.
+    else if (part instanceof vscode.LanguageModelDataPart && part.mimeType.startsWith('image/')) turn.images!.push({ mimeType: part.mimeType, dataBase64: Buffer.from(part.data).toString('base64') });
   }
   return turn;
 };
