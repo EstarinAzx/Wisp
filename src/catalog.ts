@@ -19,8 +19,11 @@ export type Provider = {
   baseUrl: string;       // hardcoded OpenAI-compatible base URL ('' for Custom — comes from settings)
   defaultModel: string;  // native-format model id used when the Provider has none remembered
   apiKeyEnv: string;     // env-var fallback for the key ('' = none, e.g. local Ollama)
-  // Note: a Provider carries no context/vision hints — both are derived from the ACTIVE model id
-  // (contextForModel / modelSupportsVision), so they track the user's model choice, not the row.
+  // models.dev provider key for live context/vision (e.g. opencode-zen -> 'opencode-go', kilocode ->
+  // 'kilo'). Omitted (local Ollama, Cline, Custom) -> no dynamic lookup; falls back to table/default.
+  catalogKey?: string;
+  // Note: context/vision carry no per-row hints — both come from the ACTIVE model: models.dev caps via
+  // catalogKey, else the contextForModel / modelSupportsVision heuristics. So they track model switches.
 };
 
 // ----------------------------- Constants ----------------------------- //
@@ -250,32 +253,67 @@ export const contextForModel = (modelId: string): ModelContext | undefined => {
   return hit ? { input: hit.input, output: hit.output } : undefined;
 };
 
+// ----------------------------- models.dev capability source ----------------------------- //
+
+// The REAL per-model capabilities, the primary (dynamic) source that demotes the hardcoded table above
+// to a fallback. All optional — a source may know some fields and not others; the builder fills each
+// gap from the table, then the default.
+export type ModelCaps = { contextInput?: number; maxOutput?: number; vision?: boolean };
+
+// The slices we read from models.dev's api.json (it carries far more we ignore). The catalog is the
+// whole document keyed by provider id (e.g. "opencode-go", "groq"), each with a models map.
+type ModelsDevEntry = { limit?: { context?: number; output?: number }; modalities?: { input?: string[] } };
+export type ModelsDevCatalog = Record<string, { models?: Record<string, ModelsDevEntry> }>;
+
+// Map one models.dev model entry to ModelCaps. Vision = its input modalities include "image" (the
+// verified reliable signal — NOT the unrelated "attachment" flag). Absent fields stay undefined.
+export const parseModelsDevEntry = (entry: ModelsDevEntry): ModelCaps => ({
+  contextInput: entry.limit?.context,
+  maxOutput: entry.limit?.output,
+  vision: entry.modalities?.input?.includes('image') ?? false,
+});
+
+// Look up a model's caps in a fetched models.dev catalog by provider key + model id; undefined when the
+// catalog/provider/model is absent (the builder then falls back to the table/default).
+export const lookupModelsDevCaps = (catalog: ModelsDevCatalog | undefined, key: string, modelId: string): ModelCaps | undefined => {
+  const entry = catalog?.[key]?.models?.[modelId];
+  return entry ? parseModelsDevEntry(entry) : undefined;
+};
+
 // Build the descriptors Wisp advertises into VS Code's native model picker: one row per Provider that
 // is actually usable. Usable = has a key AND a resolvable model AND (for Custom only) a base URL — a
 // keyless / URL-less / model-less Provider can't serve a request, so it stays hidden rather than
 // appearing as a dead pick. id is the Provider id (the response glue maps it back to {baseUrl,key}).
+// `caps` (optional, injected) is the dynamic models.dev lookup; each field resolves dynamic -> table ->
+// default, so a missing/slow/failed fetch silently degrades to the hardcoded behaviour.
 export const buildChatModelInfos = (
   providers: Provider[],
-  state: { keyed: Record<string, boolean>; modelMap: Record<string, string>; customBaseUrl: string },
+  state: {
+    keyed: Record<string, boolean>;
+    modelMap: Record<string, string>;
+    customBaseUrl: string;
+    caps?: (provider: Provider, model: string) => ModelCaps | undefined;
+  },
 ): ChatModelInfo[] =>
   providers.flatMap((p) => {
     const model = resolveModel(state.modelMap, p);
     // Custom has no hardcoded URL — without wisp.baseUrl there is nowhere to send the request.
     const reachable = p.id !== CUSTOM_ID || state.customBaseUrl.trim() !== '';
     if (!state.keyed[p.id] || !model || !reachable) return [];
-    // Size the window from the active model (falls back to the conservative defaults when unknown).
+    // Each field: dynamic models.dev caps -> hardcoded table -> conservative default.
+    const dyn = state.caps?.(p, model);
     const ctx = contextForModel(model);
     return [{
       id: p.id,
       name: `${p.label} — ${model}`,
       family: p.id,
       version: '1',
-      maxInputTokens: ctx?.input ?? DEFAULT_MAX_INPUT_TOKENS,
-      maxOutputTokens: ctx?.output ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      maxInputTokens: dyn?.contextInput ?? ctx?.input ?? DEFAULT_MAX_INPUT_TOKENS,
+      maxOutputTokens: dyn?.maxOutput ?? ctx?.output ?? DEFAULT_MAX_OUTPUT_TOKENS,
       // Advertise tool calling so the model is selectable in agent/edit/Ctrl+I — those pickers hide
       // models that don't declare it. The response glue forwards the tools and emits tool-call parts.
-      // imageInput when the active model id is a known vision family (images forwarded as data URIs).
-      capabilities: { toolCalling: true, ...(modelSupportsVision(model) ? { imageInput: true } : {}) },
+      // imageInput from models.dev's modalities, else the conservative id heuristic.
+      capabilities: { toolCalling: true, ...((dyn?.vision ?? modelSupportsVision(model)) ? { imageInput: true } : {}) },
     }];
   });
 

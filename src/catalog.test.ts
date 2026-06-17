@@ -6,6 +6,7 @@ import {
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
   buildChatModelInfos, buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools,
   modelSupportsVision, contextForModel,
+  parseModelsDevEntry, lookupModelsDevCaps,
   CUSTOM_ID, type Provider,
 } from './catalog';
 
@@ -283,6 +284,26 @@ describe('buildChatModelInfos', () => {
     expect(info.maxOutputTokens).toBe(4_096);
   });
 
+  // Dynamic models.dev caps (injected) win over the hardcoded table/heuristic — the whole point:
+  // minimax-m3 is in neither CONTEXT_TABLE nor VISION_FAMILIES, but models.dev knows its real numbers.
+  it('prefers injected dynamic caps over the table', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
+    const caps = () => ({ contextInput: 512_000, maxOutput: 131_072, vision: true });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps });
+    expect(info.maxInputTokens).toBe(512_000);
+    expect(info.maxOutputTokens).toBe(131_072);
+    expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+
+  // When caps are unavailable (model absent from models.dev / fetch failed) it degrades to today's
+  // table/heuristic behaviour.
+  it('falls back to table/default when caps return undefined', () => {
+    const zen = provider({ id: 'opencode-zen', label: 'Zen', defaultModel: 'minimax-m3' });
+    const [info] = buildChatModelInfos([zen], { keyed: { 'opencode-zen': true }, modelMap: {}, customBaseUrl: '', caps: () => undefined });
+    expect(info.maxInputTokens).toBe(128_000);
+    expect(info.capabilities).toEqual({ toolCalling: true });
+  });
+
   // A Provider whose default model is a vision family advertises imageInput; text-only defaults (Zen's
   // minimax-m3, covered above) stay tool-calling-only.
   it('advertises imageInput when the default model is a vision model', () => {
@@ -297,6 +318,42 @@ describe('buildChatModelInfos', () => {
     const zenServingClaude = provider({ id: 'opencode-zen', label: 'OpenCode Zen', defaultModel: 'minimax-m3' });
     const [info] = buildChatModelInfos([zenServingClaude], { keyed: { 'opencode-zen': true }, modelMap: { 'opencode-zen': 'claude-sonnet-4' }, customBaseUrl: '' });
     expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+});
+
+describe('parseModelsDevEntry', () => {
+  // models.dev carries the real numbers: limit.context/output and modalities.input (image => vision).
+  it('reads context, output and vision from a models.dev entry', () => {
+    const entry = { limit: { context: 512_000, output: 131_072 }, modalities: { input: ['text', 'image', 'video'], output: ['text'] } };
+    expect(parseModelsDevEntry(entry)).toEqual({ contextInput: 512_000, maxOutput: 131_072, vision: true });
+  });
+
+  it('marks text-only input modalities as no vision', () => {
+    const entry = { limit: { context: 131_072, output: 32_768 }, modalities: { input: ['text'] } };
+    expect(parseModelsDevEntry(entry)).toEqual({ contextInput: 131_072, maxOutput: 32_768, vision: false });
+  });
+
+  // Defensive against a partial/odd entry — missing limit/modalities must not throw.
+  it('tolerates missing limit and modalities', () => {
+    expect(parseModelsDevEntry({})).toEqual({ contextInput: undefined, maxOutput: undefined, vision: false });
+  });
+});
+
+describe('lookupModelsDevCaps', () => {
+  const catalog = {
+    'opencode-go': { models: { 'minimax-m3': { limit: { context: 512_000, output: 131_072 }, modalities: { input: ['text', 'image'] } } } },
+  };
+
+  it('returns caps for a known provider key + model', () => {
+    expect(lookupModelsDevCaps(catalog, 'opencode-go', 'minimax-m3')).toEqual({ contextInput: 512_000, maxOutput: 131_072, vision: true });
+  });
+
+  it('returns undefined for an unknown provider key', () => {
+    expect(lookupModelsDevCaps(catalog, 'nope', 'minimax-m3')).toBeUndefined();
+  });
+
+  it('returns undefined for an unknown model', () => {
+    expect(lookupModelsDevCaps(catalog, 'opencode-go', 'ghost')).toBeUndefined();
   });
 });
 

@@ -26,10 +26,11 @@
 import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import {
-  Provider, resolveModel, buildChatModelInfos,
+  Provider, resolveModel, buildChatModelInfos, lookupModelsDevCaps,
   buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools,
   type NormalizedTurn, type ToolCallDelta,
 } from './catalog';
+import { getModelsDevCatalog } from './modelsDev';
 
 // ----------------------------- Dependencies ----------------------------- //
 
@@ -84,10 +85,20 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       deps.providers.map(async (p) => [p.id, !!(await deps.keyFor(p))] as const),
     );
     const keyed = Object.fromEntries(keyedPairs);
+    // Pull the real context/output/vision from models.dev. Race a timeout so a cold/slow fetch never
+    // stalls the picker — it keeps caching in the background, so the next open is accurate; missing
+    // data just falls back to the table/default inside buildChatModelInfos.
+    const catalog = await Promise.race([
+      getModelsDevCatalog(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4000)),
+    ]);
+    const caps = (provider: Provider, model: string) =>
+      provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
     return buildChatModelInfos(deps.providers, {
       keyed,
       modelMap: deps.modelMap(),
       customBaseUrl: deps.customBaseUrl(),
+      caps,
     });
   },
 
@@ -150,5 +161,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
 
 // Register Wisp as the 'wisp' chat-model vendor (matches contributes.languageModelChatProviders in
 // package.json). Returns the Disposable for the caller to push onto context.subscriptions.
-export const registerWispChatProvider = (deps: ChatProviderDeps): vscode.Disposable =>
-  vscode.lm.registerLanguageModelChatProvider('wisp', makeProvider(deps));
+export const registerWispChatProvider = (deps: ChatProviderDeps): vscode.Disposable => {
+  void getModelsDevCatalog(); // warm the capability cache so the first picker open is already accurate
+  return vscode.lm.registerLanguageModelChatProvider('wisp', makeProvider(deps));
+};
