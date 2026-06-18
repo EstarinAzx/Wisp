@@ -3,9 +3,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   isCodexProvider, isCodexSignedIn,
-  buildCodexResponsesBody, reduceResponsesTextEvents, extractResponsesText,
+  buildCodexResponsesBody, reduceResponsesTextEvents, extractResponsesText, parseSseBlock,
   decodeJwtPayload, parseChatgptAccountId, shouldRefreshCodexToken,
-  parseCodexAuthJson, codexReasoning, CODEX_MODELS,
+  parseCodexAuthJson, codexReasoning, codexModelCaps, CODEX_MODELS,
   type Provider, type EditMessage,
 } from './catalog';
 
@@ -65,11 +65,41 @@ describe('buildCodexResponsesBody', () => {
     });
   });
 
-  // No system message → no `instructions` key at all (not an empty string the backend would reject).
-  it('omits instructions when there is no system message', () => {
+  // The Codex backend REQUIRES instructions (400 "Instructions are required" otherwise). The native-chat
+  // path carries no system turn (VS Code's chat API has no System role), so default it rather than omit.
+  it('defaults instructions when there is no system message', () => {
     const body = buildCodexResponsesBody({ model: 'gpt-5-codex', messages: [{ role: 'user', content: 'hi' }] });
-    expect('instructions' in body).toBe(false);
+    expect(body.instructions).toBe('You are a helpful coding assistant.');
     expect(body.input).toEqual([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }]);
+  });
+
+  // A user image becomes an input_image part with a base64 data-URI, after the text part (gpt-5/o models
+  // are multimodal — the Codex Responses backend accepts input_image, as XETH-7's codexShim sends it).
+  it('maps a user image to an input_image data-URI part after the text', () => {
+    const body = buildCodexResponsesBody({ model: 'gpt-5.5', messages: [
+      { role: 'user', content: 'what is this', images: [{ mimeType: 'image/png', dataBase64: 'AAAB' }] },
+    ] });
+    expect(body.input).toEqual([
+      { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'what is this' },
+        { type: 'input_image', image_url: 'data:image/png;base64,AAAB' },
+      ] },
+    ]);
+  });
+
+  // Multi-turn native chat replays assistant turns: the Responses API expects assistant input content to be
+  // output_text (user/system stay input_text), matching what the Codex CLI sends — wrong type 400s.
+  it('uses output_text for assistant turns, input_text for user turns', () => {
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'user', content: 'more' },
+    ] });
+    expect(body.input).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'more' }] },
+    ]);
   });
 
   // Reasoning models need a `reasoning` object on the Responses request, or the backend 400s.
@@ -98,6 +128,23 @@ describe('codexReasoning', () => {
   it('sends no reasoning for gpt-4.x and spark variants', () => {
     expect(codexReasoning('gpt-4.1')).toBeUndefined();
     expect(codexReasoning('gpt-5.3-codex-spark')).toBeUndefined();
+  });
+});
+
+describe('codexModelCaps', () => {
+  // The Codex backend has no /models route and isn't keyed to models.dev, so the chat picker would show
+  // the neutral default window. These are the real windows from models.dev/api.json. gpt-5.x Codex = 400K,
+  // and the gpt-5/o families are multimodal — the Responses backend accepts input_image (as Codex CLI does).
+  it('returns the 400K/32K window for the gpt-5.x Codex family, vision capable', () => {
+    expect(codexModelCaps('gpt-5.3-codex')).toEqual({ contextInput: 400_000, maxOutput: 32_768, vision: true });
+    expect(codexModelCaps('gpt-5.5')).toEqual({ contextInput: 400_000, maxOutput: 32_768, vision: true });
+    expect(codexModelCaps('gpt-5.1-codex-max')).toEqual({ contextInput: 400_000, maxOutput: 32_768, vision: true });
+  });
+
+  // The o-series reasoning models are a 200K context / 100K output, also multimodal.
+  it('returns the 200K/100K window for the o-series, vision capable', () => {
+    expect(codexModelCaps('o3')).toEqual({ contextInput: 200_000, maxOutput: 100_000, vision: true });
+    expect(codexModelCaps('o4-mini')).toEqual({ contextInput: 200_000, maxOutput: 100_000, vision: true });
   });
 });
 
@@ -178,6 +225,38 @@ describe('reduceResponsesTextEvents', () => {
     expect(reduceResponsesTextEvents([
       { event: 'response.incomplete', data: { response: { output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial answer' }] }] } } },
     ])).toBe('partial answer');
+  });
+});
+
+describe('parseSseBlock', () => {
+  // One SSE block = an `event:` line + one or more `data:` lines; the data JSON is paired with the name.
+  // Shared by the non-streaming reader (whole body) and the streaming path (chunk by chunk).
+  it('pairs the event name with its parsed JSON data', () => {
+    expect(parseSseBlock('event: response.output_text.delta\ndata: {"delta":"hi"}'))
+      .toEqual({ event: 'response.output_text.delta', data: { delta: 'hi' } });
+  });
+
+  // Multi-line data: the data: lines are joined before parsing (SSE splits long payloads across lines).
+  it('joins multiple data lines before parsing', () => {
+    expect(parseSseBlock('event: response.completed\ndata: {"a":1,\ndata: "b":2}'))
+      .toEqual({ event: 'response.completed', data: { a: 1, b: 2 } });
+  });
+
+  // A keep-alive / comment block has no event: line → nothing to emit.
+  it('returns undefined for a block with no event line', () => {
+    expect(parseSseBlock(': keep-alive')).toBeUndefined();
+    expect(parseSseBlock('data: {"x":1}')).toBeUndefined();
+  });
+
+  // The terminal [DONE] sentinel is not a JSON event — skip it.
+  it('returns undefined for the [DONE] sentinel', () => {
+    expect(parseSseBlock('event: done\ndata: [DONE]')).toBeUndefined();
+  });
+
+  // An event with no data line, or unparseable JSON, yields nothing rather than throwing.
+  it('returns undefined for a missing or non-JSON data payload', () => {
+    expect(parseSseBlock('event: response.completed')).toBeUndefined();
+    expect(parseSseBlock('event: response.completed\ndata: not-json')).toBeUndefined();
   });
 });
 

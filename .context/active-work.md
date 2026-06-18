@@ -8,33 +8,36 @@ tags: [context, active-work]
 # Active Work
 
 _Last updated: 2026-06-19 by Opus 4.8._
-_At commit: uncommitted (branch `feat/codex-tracer`, off `docs/codex-zen-go-scope` which holds the committed #12)._
+_At commit: about to commit (branch `feat/codex-tracer`)._
 
 ## Current focus
-Building the **Codex Provider + OpenCode Zen/Go split** batch (PRD **#11**, slices **#12–#15**). **#12 + #13 are DONE.** Codex sign-in + one live Inquire edit works end-to-end. Remaining: **#14** (Codex in the native chat picker — streaming) → **#15** (tool-calling parity).
+Building the **Codex Provider + OpenCode Zen/Go split** batch (PRD **#11**, slices **#12–#15**). **#12, #13, #14 are DONE.** Codex now works on **both** surfaces — Inquire edits AND VS Code's native chat / Ctrl+I picker (text streaming, real context windows, vision). Remaining: **#15** (tool-calling parity in agent mode).
 
 ## State
-- **Done this session — slice #13 (Codex tracer):** Codex is a working Provider via ChatGPT OAuth. New pure cores in `catalog.ts` (TDD): `isCodexProvider`, `isCodexSignedIn`, `buildCodexResponsesBody`, `reduceResponsesTextEvents`/`extractResponsesText`, `decodeJwtPayload`/`parseChatgptAccountId`/`shouldRefreshCodexToken`, `parseCodexAuthJson`, `codexReasoning`, `CODEX_MODELS` + the `Provider.kind` field. New impure modules `codexAuth.ts` (PKCE S256 OAuth, loopback `:1455`, SecretStorage `wisp.codexAuth`, `~/.codex/auth.json` import, refresh) + `codexClient.ts` (raw `/responses` fetch, SSE→text). `extension.ts` wires the Codex row, the Inquire codex branch, sign-in/out commands, panel state. Panel shows sign-in (no key field) + a curated Codex model dropdown. **`npm test` 111/111, tsc (host+webview) + Vite clean, F5 live round-trip PASSED** (a real Inquire edit ran against the Codex backend).
-- **In flight:** nothing — #13 finished, about to commit.
-- **Planned next (GitHub issues, dependency order):**
-  - **#14 (HITL)** — Codex in the native chat picker, **text streaming**. *Grab next.*
-  - **#15 (HITL)** — Codex tool-calling parity (agent mode). Blocked by #14.
+- **Done this session — slice #14 (Codex in native chat, text streaming):** Codex appears in the native chat / Ctrl+I picker when signed in and streams its reply.
+  - **Picker visibility:** `keyed[codex] = codexAuth.isSignedIn()` (was hidden as keyless). VS Code **hard-filters the picker on `toolCalling`** — a model without it is invisible *everywhere* (Ask mode + Manage Models too, confirmed by F5), so Codex advertises `toolCalling: true`; tools are **not forwarded yet** (that's #15) — `options.tools` ignored, model answers as text. This **reverses #14's acceptance #3** ("advertise false") — see [[decisions]].
+  - **Streaming:** new `codexStream` async-gen in `codexClient.ts` — incremental `sseBlocks` reader yields `response.output_text.delta` text live → `progress.report(TextPart)`; falls back to terminal payload if no deltas; throws on `response.failed`. Shares `codexResponsesRequest` (headers/body/fetch) + the pure `parseSseBlock` with the non-streaming `codexInquire` (no duplicate parser).
+  - **Request contract fixes (live-found via F5 400s):** the backend **requires `instructions`** → `buildCodexResponsesBody` defaults `"You are a helpful coding assistant."` when no system turn (VS Code chat has no System role). Assistant turns serialize as **`output_text`** (user/system `input_text`) — wrong type 400s.
+  - **Real context + vision:** new pure `codexModelCaps` — gpt-5.x family **400K/32K**, o-series **200K/100K**, `vision: true` (numbers from models.dev/api.json via XETH-7; the backend accepts `input_image` as XETH-7's codexShim sends it). Wired into `chatProvider`'s caps resolver (codex has no models.dev catalogKey). Images forwarded as `input_image` data-URIs (`buildCodexResponsesBody` + `toCodexMessages`).
+  - **Verified:** `npm test` **121/121**, `npm run compile` clean (tsc host+webview + Vite). **F5 PASSED** (Codex shows, streams, 400K context, Vision badge, image round-trip, multi-turn).
+- **In flight:** nothing — #14 finished, about to commit.
+- **Planned next:** **#15 (HITL)** — Codex tool-calling parity (agent mode). Map VS Code tools → Responses `tools`, forward them in `codexStream`, reassemble streamed `function_call` items → `LanguageModelToolCallPart`. *Grab next.*
 - **Blocked:** nothing.
 
 ## Pick up here
-Grab **#14** — `/preset scope 14`. **Goal: make Codex appear in and work through VS Code's native Language Models / Ctrl+I picker** (it's deliberately absent now — see below). Two coupled changes: (1) advertise the Codex row when **signed in** — currently keyless rows are hidden by `buildChatModelInfos`, so feed `keyed[codex] = await codexAuth.isSignedIn()` (and stop relying on `keyForProvider` returning '' for codex); (2) branch `provideLanguageModelChatResponse` in `chatProvider.ts` to the **Codex Responses streaming** path for `kind === 'codex'` rows (the current path uses the OpenAI chat-completions client → 404 against `/responses`). Reuse `codexClient`/`reduceResponsesTextEvents` but make it **stream** (the picker streams deltas) — likely a new streaming variant of `codexInquire` that yields `response.output_text.delta` text as it arrives, plus `codexAuth.current()` for refreshed creds. Keep `toolCalling` **false** for codex until #15. Reference: `XETH--7` `codexShim.ts` `codexStreamToAnthropic` (the streaming reducer).
+Grab **#15** — `/preset scope 15`. **Goal: Codex tool calling in agent mode.** Today the codex chat branch advertises `toolCalling: true` but **ignores `options.tools`** (text-only). #15 wires the real path: (1) convert VS Code tool defs → Responses `tools` array (XETH-7 `codexShim.ts` `convertToolsToResponsesTools` + strict-schema `required` enforcement is the reference); (2) include them in `buildCodexResponsesBody`/`codexResponsesRequest`; (3) in `codexStream`, the SSE carries `response.output_item.added`/`function_call` items — accumulate their `arguments` deltas and emit `LanguageModelToolCallPart` (mirror the existing chat-completions `assembleToolCalls` pattern, but for Responses events). Reference: XETH-7 `codexShim.ts` (tool conversion + the Responses tool-call event handling).
 
 ## Skills for next session
-- `superpowers:test-driven-development` — TDD any new pure cores (e.g. a streaming-delta reducer) into `catalog.ts`.
-- `/preset scope 14` — entry gate before coding #14.
+- `superpowers:test-driven-development` — TDD new pure cores (Responses tool-call reducer, tool converter) into `catalog.ts`.
+- `/preset scope 15` — entry gate before coding #15.
 
 ## Open questions
-- The Codex `reasoning` effort is a fixed `medium` for all gpt-5/o models. If a model needs `high` (or rejects `medium`), make it per-model. Not yet observed.
+- Codex `reasoning` effort is a fixed `medium` for gpt-5/o models. If a model needs `high` (or rejects `medium`), make it per-model. Not yet observed.
+- `codexModelCaps` vision is blanket-`true` for all codex ids (matches XETH-7's unconditional image forwarding). If a specific `*-codex` id 400s on an image, gate vision per-model. Not yet observed.
 
 ## Recent context
-- **#13 live findings (F5):** `gpt-5-codex` is a **dead model id** (400) — current Codex ids are `gpt-5.4`/`gpt-5.3-codex`/`gpt-5.2-codex`/`gpt-5.1-codex-max`/… The default is now **`gpt-5.3-codex`**. Reasoning models **require** a `reasoning: { effort, summary:'auto' }` object on the `/responses` body or they 400 — sent for gpt-5/o models, omitted for gpt-4.x/spark (`codexReasoning`). The bearer is the OAuth **access_token** (subscription path), NOT the exchanged `sk-` apiKey.
-- **#13 non-obvious fix:** sign-out must write an **empty tombstone** to `wisp.codexAuth`, not delete the slot — else `~/.codex/auth.json` is re-imported on the next render and sign-out never sticks. See [[gotchas]].
-- Codex is intentionally **absent from the native chat picker** in #13 (keyless → hidden, and the chat surface speaks chat-completions not Responses). That's exactly #14's job.
+- **VS Code picker filtering (the #14 surprise):** the chat/Ctrl+I picker shows ONLY tool-capable models — a `toolCalling:false` model is absent even from Ask mode, only visible in the Manage Models list. Docs: "if the model doesn't support tool calling, it won't be shown in the model picker." This forced advertising `toolCalling:true` before tools are actually wired.
+- **Vision correction:** mid-session I wrongly called Codex text-only (trusting Copilot's conservative `modalities` metadata). XETH-7's codexShim forwards `input_image` to the *same* backend → vision is real; corrected to `vision:true` + image plumbing.
 
 ## Related
 - [[overview]]

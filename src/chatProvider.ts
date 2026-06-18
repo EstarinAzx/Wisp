@@ -26,10 +26,11 @@
 import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import {
-  Provider, resolveModel, buildChatModelInfos, lookupModelsDevCaps,
-  buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools,
-  type NormalizedTurn, type ToolCallDelta,
+  Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
+  buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, isCodexProvider, codexModelCaps,
+  type NormalizedTurn, type ToolCallDelta, type CodexCreds,
 } from './catalog';
+import { codexStream } from './codexClient';
 import { getModelsDevCatalog } from './modelsDev';
 
 // ----------------------------- Dependencies ----------------------------- //
@@ -42,6 +43,10 @@ export type ChatProviderDeps = {
   customBaseUrl: () => string;                      // wisp.baseUrl (only Custom resolves from it)
   keyFor: (provider: Provider) => Promise<string>;  // resolved key, '' when none
   clientFor: (provider: Provider) => Promise<OpenAI | undefined>; // built {baseUrl, key} client
+  // Codex has no API key — it is "usable when signed in". These two feed the codex row: its keyed flag
+  // (so a not-signed-in Codex stays hidden) and its refreshed OAuth creds for the streaming Responses call.
+  codexSignedIn: () => Promise<boolean>;
+  codexCreds: () => Promise<CodexCreds | undefined>;
   log: (message: string) => void;
 };
 
@@ -73,6 +78,14 @@ const normalizeTurn = (m: vscode.LanguageModelChatRequestMessage): NormalizedTur
 const toOpenAiMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
   buildOpenAiChatMessages(messages.map(normalizeTurn));
 
+// Native chat turns → Codex Responses messages: role, text, and any attached images (forwarded as
+// input_image). Tool calls aren't forwarded yet (wired in Slice 4). A turn with neither text nor an image
+// (e.g. a bare tool-result) is dropped.
+const toCodexMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
+  messages.map(normalizeTurn)
+    .map((t) => ({ role: t.role, content: t.text, images: t.images }))
+    .filter((m) => m.content || (m.images?.length ?? 0) > 0);
+
 // ----------------------------- Provider ----------------------------- //
 
 // Implements the three LanguageModelChatProvider methods over Wisp's catalog. The model `id` we
@@ -82,7 +95,8 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
   // every Provider first, then hand the plain facts to the pure builder, which owns the usability rules.
   provideLanguageModelChatInformation: async () => {
     const keyedPairs = await Promise.all(
-      deps.providers.map(async (p) => [p.id, !!(await deps.keyFor(p))] as const),
+      // Codex usability is "signed in" (no API key); every other row is "has a key".
+      deps.providers.map(async (p) => [p.id, isCodexProvider(p) ? await deps.codexSignedIn() : !!(await deps.keyFor(p))] as const),
     );
     const keyed = Object.fromEntries(keyedPairs);
     // Pull the real context/output/vision from models.dev. Race a timeout so a cold/slow fetch never
@@ -92,8 +106,11 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       getModelsDevCatalog(),
       new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4000)),
     ]);
+    // Codex has no models.dev catalogKey (no /models route), so use its own real-window table; every other
+    // row pulls live caps from models.dev when it has a catalogKey.
     const caps = (provider: Provider, model: string) =>
-      provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
+      isCodexProvider(provider) ? codexModelCaps(model)
+        : provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
     return buildChatModelInfos(deps.providers, {
       keyed,
       modelMap: deps.modelMap(),
@@ -108,16 +125,36 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
   provideLanguageModelChatResponse: async (model, messages, options, progress, token) => {
     const provider = deps.providers.find((p) => p.id === model.id);
     if (!provider) return;
+    const modelId = resolveModel(deps.modelMap(), provider);
+
+    const controller = new AbortController();
+    token.onCancellationRequested(() => controller.abort());
+
+    // Codex speaks the Responses API, not chat completions — stream its text reply through the dedicated
+    // client. Codex advertises toolCalling so the picker shows it, but the tools aren't forwarded yet
+    // (wired in Slice 4): options.tools is ignored, so the model just answers as text deltas.
+    if (isCodexProvider(provider)) {
+      const creds = await deps.codexCreds();
+      if (!creds) return; // only signed-in Codex is advertised — rare sign-out race
+      const baseUrl = resolveBaseUrl(provider, deps.customBaseUrl());
+      try {
+        for await (const delta of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), signal: controller.signal })) {
+          progress.report(new vscode.LanguageModelTextPart(delta));
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return; // user cancelled — normal, not a failure
+        deps.log(`[error] chat ${provider.id} ${String(err)}`);
+        throw err;
+      }
+      return;
+    }
+
     const client = await deps.clientFor(provider);
     if (!client) return; // only usable models are advertised, so this is the rare key-revoked race
-    const modelId = resolveModel(deps.modelMap(), provider);
 
     // Forward the agent's tools so the model can call them; tool_choice mirrors VS Code's tool mode.
     const tools = toOpenAiTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
     const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
-
-    const controller = new AbortController();
-    token.onCancellationRequested(() => controller.abort());
 
     try {
       const stream = await client.chat.completions.create(

@@ -9,33 +9,34 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate.
 
-**Last session (2026-06-19):** Built + shipped **slice #13 — Codex tracer** on branch **`feat/codex-tracer`**.
-Codex is now a working Provider via ChatGPT OAuth: sign in (or import `~/.codex/auth.json`) → one **Inquire**
-edit runs live against the Codex **Responses** backend. New pure cores in `catalog.ts` (TDD) + new impure
-`codexAuth.ts` (OAuth/PKCE/loopback `:1455`/SecretStorage `wisp.codexAuth`/refresh) + `codexClient.ts`
-(`/responses` fetch + SSE→text). **`npm test` 111/111, tsc+webview+vite clean, F5 live round-trip PASSED.**
+**Last session (2026-06-19):** Built + shipped **slice #14 — Codex in the native chat picker (text streaming)**
+on branch **`feat/codex-tracer`**. Codex now appears in VS Code's native chat / Ctrl+I picker when signed in
+and **streams** its text reply through the Responses API, with **real context windows** (gpt-5.x 400K / o-series
+200K) and **vision** (image attachments forwarded as `input_image`). New pure cores in `catalog.ts` (TDD) +
+`codexStream` in `codexClient.ts`. **`npm test` 121/121, tsc+webview+vite clean, F5 PASSED** (shows, streams,
+400K, Vision badge, image + multi-turn round-trip).
 
-**Next task: build slice #14 — Codex in the native chat picker (text streaming).** HITL, unblocked. Then
-**#15** (tool-calling parity). Enter with **`/preset scope 14`**.
+**Next task: build slice #15 — Codex tool-calling parity (agent mode).** HITL, unblocked. Enter with
+**`/preset scope 15`**.
 
-**What #14 must do:** make Codex appear in **and work through** VS Code's native Language Models / Ctrl+I
-picker (it's deliberately absent in #13). Two coupled changes:
-- **Advertise when signed in** — keyless rows are hidden by `buildChatModelInfos`; feed
-  `keyed[codex] = await codexAuth.isSignedIn()` rather than `keyForProvider` returning ''.
-- **Stream the Responses path** — branch `provideLanguageModelChatResponse` (`chatProvider.ts`) for
-  `kind === 'codex'` to a **streaming** Codex call (the current OpenAI chat-completions path 404s against
-  `/responses`). Likely a new streaming variant of `codexInquire` that yields `response.output_text.delta`
-  text as it arrives. Use `codexAuth.current()` for refreshed creds.
+**What #15 must do:** the codex chat branch already advertises `toolCalling: true` but **ignores
+`options.tools`** (text-only — it just streams text). Wire the real path:
+- **Convert tools** — VS Code tool defs → Responses `tools` array; add them to `buildCodexResponsesBody` /
+  `codexResponsesRequest`.
+- **Stream tool calls** — in `codexStream`, the SSE carries `function_call` items (via
+  `response.output_item.added` + argument deltas); accumulate them and emit `LanguageModelToolCallPart`
+  (mirror the chat-completions `assembleToolCalls` pattern, but for Responses events).
 
 **Landmines:**
-- Reference for the streaming reducer: `XETH--7` `src/services/api/codexShim.ts` `codexStreamToAnthropic`
-  (`D:\Mods\xethryon\new agent\XETH--7`).
-- Bearer = OAuth **access_token** (subscription path), NOT the exchanged `sk-` apiKey. Headers:
-  `chatgpt-account-id`, `originator: codex_cli_rs`, `OpenAI-Beta: responses=experimental`, `session_id`.
-- Reasoning models **require** `reasoning: { effort, summary:'auto' }` on the body (`codexReasoning`);
-  `gpt-5-codex` is a dead id — default is `gpt-5.3-codex`.
-- Keep Codex **`toolCalling: false`** until #15 (honest capabilities) — but VS Code hides non-tool models
-  from agent/edit pickers, so confirm Codex still shows in Ask mode at least, or accept agent-mode hiding.
-- #13 shares `catalog.ts` + `chatProvider.ts` + the `Provider` type with committed #12 — build on it.
+- Reference: `XETH--7` `src/services/api/codexShim.ts` — `convertToolsToResponsesTools` (+ its strict-schema
+  `required` enforcement) and the Responses tool-call event handling (`D:\Mods\xethryon\new agent\XETH--7`).
+- The Codex `/responses` backend **requires `instructions`** (defaults to "You are a helpful coding assistant."
+  when no system turn — VS Code chat has no System role). Assistant content is **`output_text`**, user/system
+  `input_text` — wrong type 400s. Images (`input_image`) only on non-assistant turns.
+- The picker **hard-filters on `toolCalling`** — that's why Codex advertises true now; once tools forward,
+  the advertise becomes fully honest (it currently reverses #14's acceptance #3 — see [[decisions]]).
+- Bearer = OAuth **access_token** (subscription path); reasoning models need `reasoning:{effort,summary:'auto'}`
+  (`codexReasoning`); `gpt-5-codex` is a dead id (default `gpt-5.3-codex`).
+- #14 shares `catalog.ts` + `chatProvider.ts` + `codexClient.ts` with committed #12/#13 — build on it.
 
-Full state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.
+Full state in [[active-work]]; settled choices in [[decisions]]; new traps in [[gotchas]]; domain language in `CONTEXT.md`.

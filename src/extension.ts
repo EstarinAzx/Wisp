@@ -670,6 +670,10 @@ export const activate = (context: vscode.ExtensionContext): void => {
       customBaseUrl: () => cfg().get<string>('baseUrl') ?? '',
       keyFor: keyForProvider,
       clientFor: clientForProvider,
+      // Codex usability + creds for the chat surface: signed-in flag gates the row, current() returns the
+      // refreshed OAuth bundle for the streaming Responses call.
+      codexSignedIn: () => codexAuth.isSignedIn(),
+      codexCreds: () => codexAuth.current(),
       log: (m) => output.appendLine(m),
     }),
     // Keep derived state in sync when settings change out from under us.

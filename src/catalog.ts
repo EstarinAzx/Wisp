@@ -301,9 +301,10 @@ export const buildChatModelInfos = (
       version: '1',
       maxInputTokens,
       maxOutputTokens,
-      // Advertise tool calling so the model is selectable in agent/edit/Ctrl+I — those pickers hide
-      // models that don't declare it. The response glue forwards the tools and emits tool-call parts.
-      // imageInput from models.dev's modalities, else the conservative id heuristic.
+      // Tool calling advertised for EVERY row — VS Code hides non-tool models from the chat/Ctrl+I picker
+      // entirely, so even Codex must declare it to be selectable (its tools are wired in Slice 4; until then
+      // it simply answers as text). imageInput from models.dev's modalities (Codex: from codexModelCaps),
+      // else the id heuristic — Codex forwards images as input_image parts, so vision flows through honestly.
       capabilities: { toolCalling: true, ...((dyn?.vision ?? modelSupportsVision(model)) ? { imageInput: true } : {}) },
     }];
   });
@@ -446,30 +447,48 @@ export const isCodexSignedIn = (creds: CodexCreds | undefined): boolean =>
 // ----------------------------- Codex Responses request ----------------------------- //
 
 // The Codex backend speaks the OpenAI *Responses* API, not chat completions: the system prompt is a
-// top-level `instructions` string and the conversation is `input` message items whose text parts are
-// typed `input_text`. store:false (don't persist server-side); stream:true (we reduce the SSE to text).
+// top-level `instructions` string and the conversation is `input` message items. User/system text parts
+// are typed `input_text`; assistant (replayed prior turns) are `output_text` — the API rejects the wrong
+// type. store:false (don't persist server-side); stream:true (we reduce the SSE to text).
 export type CodexReasoning = { effort: 'low' | 'medium' | 'high'; summary: 'auto' };
+
+// One content part of a Responses input message: text (input_text for user/system, output_text for a
+// replayed assistant turn) or an image (input_image as a base64 data-URI / url).
+export type CodexContentPart = { type: 'input_text' | 'output_text'; text: string } | { type: 'input_image'; image_url: string };
 
 export type CodexResponsesBody = {
   model: string;
-  instructions?: string;
-  input: { type: 'message'; role: string; content: { type: 'input_text'; text: string }[] }[];
+  instructions: string;
+  input: { type: 'message'; role: string; content: CodexContentPart[] }[];
   reasoning?: CodexReasoning;
   store: false;
   stream: true;
 };
 
-// Translate Inquire's EditMessage[] (a system message + a user message, from buildEditPrompt) into a
-// Codex Responses request body. System content becomes `instructions` (omitted entirely when empty, so
-// the backend never sees a blank string); every other message becomes an input_text message item.
-// reasoning is included only when supplied — reasoning models REQUIRE it (else the backend 400s), and
+// The Codex backend REQUIRES a non-empty instructions field (400 "Instructions are required" otherwise).
+// The native-chat path has no system turn — VS Code's chat API has no System role — so fall back to this.
+const CODEX_DEFAULT_INSTRUCTIONS = 'You are a helpful coding assistant.';
+
+// Translate a conversation into a Codex Responses request body. Inquire passes its EditMessage[] (a system
+// + a user message); the native-chat path passes user/assistant turns, optionally with images. System
+// content becomes `instructions`, defaulting when there is none so the backend never sees it absent. Every
+// other message becomes a message item: text typed by role (assistant→output_text, else input_text), then
+// any images as input_image data-URIs — but only on non-assistant turns, since the API rejects input_image
+// on assistant items. reasoning is included only when supplied — reasoning models REQUIRE it (else 400),
 // non-reasoning models REJECT it, so the caller decides per model via codexReasoning().
-export const buildCodexResponsesBody = (args: { model: string; messages: EditMessage[]; reasoning?: CodexReasoning }): CodexResponsesBody => {
-  const instructions = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+export const buildCodexResponsesBody = (args: { model: string; messages: { role: 'system' | 'user' | 'assistant'; content: string; images?: { mimeType: string; dataBase64: string }[] }[]; reasoning?: CodexReasoning }): CodexResponsesBody => {
+  const instructions = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || CODEX_DEFAULT_INSTRUCTIONS;
   const input = args.messages
     .filter((m) => m.role !== 'system')
-    .map((m) => ({ type: 'message' as const, role: m.role, content: [{ type: 'input_text' as const, text: m.content }] }));
-  return { model: args.model, ...(instructions ? { instructions } : {}), input, ...(args.reasoning ? { reasoning: args.reasoning } : {}), store: false, stream: true };
+    .map((m) => {
+      const textType = m.role === 'assistant' ? 'output_text' as const : 'input_text' as const;
+      const content: CodexContentPart[] = [];
+      if (m.content) content.push({ type: textType, text: m.content });
+      if (m.role !== 'assistant') for (const img of m.images ?? []) content.push({ type: 'input_image', image_url: `data:${img.mimeType};base64,${img.dataBase64}` });
+      if (content.length === 0) content.push({ type: textType, text: '' }); // a message item needs ≥1 part
+      return { type: 'message' as const, role: m.role, content };
+    });
+  return { model: args.model, instructions, input, ...(args.reasoning ? { reasoning: args.reasoning } : {}), store: false, stream: true };
 };
 
 // The reasoning object to send for a Codex model, or undefined when it must be omitted. gpt-5 / o-series
@@ -479,6 +498,16 @@ export const codexReasoning = (model: string): CodexReasoning | undefined => {
   const m = model.toLowerCase();
   if (m.includes('spark')) return undefined;
   return /^(gpt-5|o3|o4)/.test(m) ? { effort: 'medium', summary: 'auto' } : undefined;
+};
+
+// Real Codex model windows, since the backend has no /models route and these ids aren't keyed to
+// models.dev — without this the chat picker would show the neutral default window. Numbers are from
+// models.dev/api.json: the gpt-5.x Codex family is a 400K context / 32K output; the o-series reasoning
+// models are 200K / 100K. vision is true: the gpt-5/o families are multimodal and the Codex Responses
+// backend accepts input_image (as the Codex CLI / XETH-7's codexShim send it).
+export const codexModelCaps = (model: string): ModelCaps => {
+  if (/^o[0-9]/.test(model.toLowerCase())) return { contextInput: 200_000, maxOutput: 100_000, vision: true };
+  return { contextInput: 400_000, maxOutput: 32_768, vision: true };
 };
 
 // Curated Codex model ids for the panel dropdown — the Codex backend has no /models route, so this
@@ -492,6 +521,21 @@ export const CODEX_MODELS: string[] = [
 
 // One parsed Server-Sent Event off the Codex Responses stream: the SSE `event:` name and its `data:` JSON.
 export type CodexResponsesEvent = { event: string; data: any };
+
+// Parse ONE SSE block (a blank-line-separated run of `event:`/`data:` lines) into an event. The data:
+// lines are joined before JSON parsing (SSE splits long payloads across lines). undefined for a block
+// with no event/data, the [DONE] sentinel, or unparseable JSON. Shared by the non-streaming reader (it
+// splits the whole body into blocks) and the streaming path (it parses each completed block as it arrives)
+// so there is one SSE parser, not two.
+export const parseSseBlock = (block: string): CodexResponsesEvent | undefined => {
+  const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+  const eventLine = lines.find((l) => l.startsWith('event:'));
+  const dataLines = lines.filter((l) => l.startsWith('data:'));
+  if (!eventLine || dataLines.length === 0) return undefined;
+  const raw = dataLines.map((l) => l.slice('data:'.length).trim()).join('\n');
+  if (raw === '[DONE]') return undefined;
+  try { return { event: eventLine.slice('event:'.length).trim(), data: JSON.parse(raw) }; } catch { return undefined; }
+};
 
 // Pull the answer text out of a *final* Responses object (the `response.completed` payload, or a
 // non-streamed reply). Walks output[] message items and concatenates every output_text part — reasoning

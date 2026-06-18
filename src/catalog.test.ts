@@ -305,6 +305,16 @@ describe('buildChatModelInfos', () => {
     expect(info.maxOutputTokens).toBeGreaterThan(0);
   });
 
+  // VS Code HIDES non-tool models from the chat/Ctrl+I picker entirely (docs: "if the model doesn't
+  // support tool calling, it won't be shown in the model picker"). So Codex must advertise toolCalling:true
+  // to be selectable at all — tools aren't forwarded until Slice 4, the model just answers as text.
+  // imageInput follows the model's vision capability (gpt-5.x here) — Codex forwards images as input_image.
+  it('advertises toolCalling and imageInput for a vision-capable codex row', () => {
+    const codex = provider({ id: 'codex', label: 'Codex', defaultModel: 'gpt-5.3-codex', kind: 'codex' });
+    const [info] = buildChatModelInfos([codex], { keyed: { codex: true }, modelMap: {}, customBaseUrl: '', caps: () => ({ contextInput: 400_000, maxOutput: 32_768, vision: true }) });
+    expect(info.capabilities).toEqual({ toolCalling: true, imageInput: true });
+  });
+
   // No dynamic caps (no catalogKey / offline) → the neutral default window, decomposed so input+output
   // total it. There is no per-model context guess table; an unknown model is honestly "neutral default".
   it('uses the neutral default window when there are no caps', () => {

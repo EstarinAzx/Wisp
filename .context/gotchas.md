@@ -128,12 +128,37 @@ re-sign-in — sign-out would never stick for a CLI user. A present-but-bearer-l
 *and* suppresses the import. Only an **unwritten** slot (undefined) triggers the one-time auth.json import; a
 tombstone does not. Don't "simplify" sign-out back to a delete.
 
-### Codex is hidden from the native chat picker until #14 (keyless + wrong transport)
-The Codex row is keyless (`apiKeyEnv:''`, no `keyId`), so `keyForProvider` returns '' → `buildChatModelInfos`
-hides it from VS Code's Language Models / Ctrl+I picker (keyless = hidden, by design). That's intentional for
-#13: even if advertised, `chatProvider.ts`'s `provideLanguageModelChatResponse` streams through the OpenAI
-**chat-completions** client, which 404s against the Codex `/responses` endpoint. #14 fixes both together
-(advertise-when-signed-in + a Responses streaming branch). Inquire works because it has its own codex branch.
+### The chat/Ctrl+I picker hard-filters on `toolCalling` — a text-only model is INVISIBLE
+VS Code shows ONLY tool-capable models in the chat / Ctrl+I / agent picker. A model advertising
+`toolCalling: false` is absent **everywhere** the picker appears — Ask mode included; it shows up **only** in
+the Manage Models list (which lists every registered model, regardless of capability). Docs: "if the model
+doesn't support tool calling, it won't be shown in the model picker" (confirmed by #14 F5). Consequence:
+**Codex advertises `toolCalling: true` even though tools aren't forwarded until #15** — visibility requires
+it. `buildChatModelInfos` sets `toolCalling: true` for every row. Don't set it false for a model you still
+want selectable. (`imageInput`/vision is NOT filtered on — only `toolCalling`.)
+
+### Codex `/responses` requires a non-empty `instructions` — default it for native chat
+The backend **400s "Instructions are required"** if `instructions` is absent or empty. Inquire never hit this
+(`buildEditPrompt` always emits a system message), but the native-chat path has **no System role** (VS Code's
+chat API only has User/Assistant), so it sent none → 400. `buildCodexResponsesBody` now **defaults**
+`"You are a helpful coding assistant."` when no system turn is present; `CodexResponsesBody.instructions` is
+required, not optional. Don't make it omittable again.
+
+### Codex Responses input: assistant content is `output_text`, user/system is `input_text`
+A replayed **assistant** turn's content part must be typed `output_text`; user/system stay `input_text`. The
+Responses API rejects the wrong type. `buildCodexResponsesBody` picks per role. Images (`input_image`) ride
+only on non-assistant turns (the API rejects `input_image` on assistant items). Mirrors XETH-7's codexShim
+`convertContentBlocksToResponsesParts`.
+
+### Codex caps come from `codexModelCaps`, not models.dev — and it IS vision-capable
+The Codex row has no models.dev `catalogKey` and the backend has no `/models` route, so the live-caps path
+(which retired the context guess table) can't reach these ids. `codexModelCaps` (in `catalog.ts`) supplies
+real windows — gpt-5.x **400K/32K**, o-series **200K/100K** — and `vision: true`. `chatProvider`'s caps
+resolver routes codex rows to it. **Vision is real**: gpt-5/o are multimodal and the Codex backend accepts
+`input_image` (XETH-7's codexShim forwards it to the same endpoint) — don't be misled by Copilot's
+conservative `modalities: ['text']` registry flag, which understates it. This is the one place a small
+codex-only caps table is intentional (see [[decisions]] 2026-06-19); don't fold codex back to the neutral
+default.
 
 ## Related
 - [[api]]
