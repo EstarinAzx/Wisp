@@ -1,7 +1,7 @@
 ---
 type: gotchas
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-18
 tags: [context, gotchas]
 ---
 
@@ -29,7 +29,17 @@ The extension references the webview bundle by fixed path (`main.js` / `main.css
 Never post the API key value back to the webview — only a `keyIsSet` boolean. Invalidate the cached OpenAI client whenever the key is set or cleared.
 
 ### Model ids are BARE on `zen/go/v1` — the `opencode/` prefix is rejected
-The chat endpoint returns `401 Model opencode/minimax-m3 is not supported` for a provider-prefixed id. Use the **bare** id exactly as `GET /models` serves it (`minimax-m3`, `glm-5`, `kimi-k2.6`, …). `DEFAULT_MODEL`, the setting default, and `fetchModelIds` must all stay bare. The `opencode/<id>` form (from the reference `llm-provider` and the public docs) does **not** work against this gateway — it had inline completions silently erroring the whole time. See [[decisions]].
+The chat endpoint returns `401 Model opencode/minimax-m3 is not supported` for a provider-prefixed id. Use the **bare** id exactly as `GET /models` serves it (`minimax-m3`, `glm-5`, `kimi-k2.6`, …). `DEFAULT_MODEL`, the setting default, and `fetchModelIds` must all stay bare. The `opencode/<id>` form (from the reference `llm-provider` and the public docs) does **not** work against this gateway — it had inline completions silently erroring the whole time. The sibling **`/zen/v1`** (OpenCode Zen, added in #12) also serves **bare** ids (verified 2026-06-18 against its public `GET /zen/v1/models`) — but a **different, premium** model set (Claude/GPT/Gemini), not Go's budget ids. See [[decisions]].
+
+### A shared-credential Provider must set `keyId` or it's hidden from the chat picker
+`buildChatModelInfos` only advertises **keyed** Providers (a keyless row would be a dead pick). So a new
+row that shares another row's credential is **invisible** until it has its own key — even though the
+credential already exists. **OpenCode Go + OpenCode Zen are one OpenCode account / one key, two endpoints**
+(`/zen/go/v1` vs `/zen/v1`); the Zen row sets **`keyId: 'opencode-go'`** so it borrows Go's stored key via
+`resolveKeyId`/`keySlotFor`. This also dictated the #12 migration: the zen→go move **deletes** the old
+`opencode-zen` slot, because a Go key left in it would be inherited by the new `/zen/v1` row → 401. When
+adding any Provider that shares an existing account's key, set `keyId` — don't make the user enter it twice.
+See [[decisions]] 2026-06-18 Zen/Go-split-built entry.
 
 ### Served models are reasoning models — strip `<think>` and DON'T cap tokens
 Most `zen/go` ids (minimax-m3, mimo, qwen3*, glm5*) emit chain-of-thought **inline** as `<think>…</think>`, then the real answer. Two consequences: (1) `stripThink` (in `src/catalog.ts`, composed into `extractEditText`) must drop the block (and treat an unterminated `<think>` as "no answer yet" → return nothing) or the Inquire edit is the model's thinking; (2) a low `max_tokens` cap starves the answer — the model spends the budget thinking and never reaches code. `maxTokens` default is therefore `0` (uncapped); `max_tokens` is omitted from the request unless set `>0`. For snappy edits use a non-reasoning id (`deepseek-v4-flash`, `kimi-k2.6`). See [[decisions]].

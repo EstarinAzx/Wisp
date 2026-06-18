@@ -9,31 +9,33 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate.
 
-**Last session (2026-06-18):** Built **slice #7 — the Language Model Chat Provider** (`src/chatProvider.ts`):
-Wisp's keyed Providers now show as models in VS Code's **native** chat / Ctrl+I (vendor `wisp`), streaming
-through Wisp's own OpenAI client. Then, per user asks, added **tool calling** (forward `options.tools`,
-emit `LanguageModelToolCallPart`), **vision** (image parts → `image_url` data URIs), and **live per-model
-context/vision from models.dev** (`src/modelsDev.ts`; heuristics demoted to fallback), and fixed the
-context **decomposition** so VS Code's summed "Context Size" shows the real window (kimi 256K, not 524K).
-**Released v1.0.0** — `CHANGELOG.md`, GitHub release `v1.0.0` + `wisp-1.0.0.vsix`. `npm test` 70/70,
-`npm run compile` clean. Merged to `main` via PR; you're on `main`, clean.
+**Last session (2026-06-18):** Built + shipped **slice #12 — OpenCode Zen/Go split + key migration** on
+branch **`docs/codex-zen-go-scope`**. Renamed `opencode-zen` → **`opencode-go`** (default, id==catalogKey),
+added a real **`opencode-zen`** row at `/zen/v1` (premium Claude/GPT/Gemini, bare ids, default
+`claude-haiku-4-5`). New pure cores `planZenToGoMigration` + `resolveKeyId` in `catalog.ts` (TDD).
+`migrateZenToGo` runs before the re-pointed `migrateLegacyKey` on activate. **`npm test` 73/73, compile
+clean, F5 PASSED.** Discovered+fixed: the new keyless Zen row was hidden from the chat picker → added
+**`keyId`** so Zen borrows Go's key (one OpenCode account, one key, two endpoints).
 
-**Next task: OPEN / user-led.** The #3 inline-chat pivot epic is fully done. No committed next task.
-- If the user wants polish: the **strip-guess-tables** decision is still open (delete `CONTEXT_TABLE` +
-  `VISION_FAMILIES` so the only fallback is a neutral default — user leaned toward keeping them).
-- Carried backlog: verify the 3 ⚠ `defaultModel`s once keys exist; README pass.
-- New feature → `superpowers:brainstorming`, then `/preset init` or `to-prd`/`to-issues`.
+**Next task: build slice #13 — Codex tracer (ChatGPT OAuth sign-in + one Inquire edit).** HITL, unblocked.
+Then **#14** (Codex native chat, text streaming) → **#15** (tool-calling parity). Enter with
+**`/preset scope 13`**.
 
-**Landmines (see [[gotchas]] + [[decisions]]):**
-- **models.dev key = base-URL match, NOT name.** `opencode-zen` (`.../zen/go/v1`) → **`opencode-go`**
-  (NOT `opencode`, which is `.../zen/v1`); `kilocode` → **`kilo`**. Wrong key = silent table fallback.
-- **Local Ollama, Cline, Custom are absent from models.dev** → no `catalogKey` → table/default. Expected.
-- **Honest capabilities:** never advertise `toolCalling`/`imageInput` without the real passthrough — VS
-  Code hides non-tool models from agent/edit/Ctrl+I, and a declared-but-unimplemented capability breaks.
-- **Context is the TOTAL window, decomposed** input+output (VS Code sums them). Don't pass `context` as
-  input AND `output` as output — that double-counts.
-- **Pure logic stays vscode-free in `catalog.ts`** (TDD via `npm test`); `modelsDev.ts` is the only
-  network module (also vscode-free). Don't fold testable logic into `extension.ts`/`chatProvider.ts`.
-- `engines.vscode` is now **^1.104** (the LM Chat Provider API is finalized there).
+**Landmines:**
+- Codex = a discriminated **`kind: 'openai-chat' | 'codex'`** Provider row. Pure logic (Responses-event
+  reducer, request builder, JWT parse + refresh decision, `~/.codex/auth.json` parser, codex-usable
+  branch) → `catalog.ts` (TDD). Impure (OAuth/IO, loopback `:1455`, browser, token store, live Responses
+  fetch) → new `codexAuth.ts` + `codexClient.ts`.
+- Tokens in SecretStorage **`wisp.codexAuth`**; import `~/.codex/auth.json` if present; refresh at
+  `exp − 60s`.
+- OAuth = the **published Codex-CLI app** (client_id `app_EMoamEEZ73f0Ck…`, redirect
+  `localhost:1455/auth/callback`, PKCE S256, originator `codex_cli_rs`). Reference impl mapped at
+  `D:\Mods\xethryon\new agent\XETH--7`.
+- **Validate early:** #13 must do a **live round-trip** (Codex backend accepts our originator/headers +
+  stream shape) before #14/#15 build on it.
+- **Honest capabilities:** flip Codex `toolCalling: true` ONLY once the Responses tool-mapper exists (#15).
+- #13 shares `catalog.ts` + the `Provider` type with #12's committed work — build on it, no conflict.
+- **`keyId` precedent (from #12):** a Provider sharing an existing account's key sets `keyId`; a keyless
+  row is hidden from the chat picker. Relevant if Codex reuses any shared credential. See [[gotchas]].
 
-Full rolling state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.
+Full state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.

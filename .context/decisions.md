@@ -1,7 +1,7 @@
 ---
 type: decisions
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-18
 tags: [context, decisions]
 ---
 
@@ -392,6 +392,74 @@ fallback signal, and the failure modes differ: a wrong context window is just a 
 guessed vision flag would send images a backend rejects. `npm test` 67/67.
 **Reversibility:** easy (the table was pure data) — but don't re-add a context guess; models.dev or
 neutral default is the intended behaviour.
+
+## 2026-06-18 — Codex Provider: supersede the no-OAuth ADR (subscription-backed)
+
+**Decision:** Add a **Codex Provider** — a new Provider *kind* reached by ChatGPT-account
+**OAuth sign-in**, running OpenAI's Codex models on the user's subscription via the **Responses
+API** (`/backend-api/codex/responses`, SSE), on **both** surfaces (Inquire + LM Chat Provider).
+This **supersedes the 2026-06-15 "no OAuth subsystem / OpenAI-chat-only" decision** for the Codex
+case. Modeled as a discriminated **`kind: 'openai-chat' | 'codex'`** catalog row so selection /
+panel / model-memory / chat-enumeration are reused; only **auth**, **request transport**, and the
+**"usable"** test branch on kind. Pure logic (Responses reducer, request builder, JWT parse +
+refresh, `~/.codex/auth.json` parser, codex-usable branch) in `catalog.ts` (TDD); impure OAuth/IO +
+Responses shim in new `codexAuth.ts` / `codexClient.ts`. Tokens in **SecretStorage `wisp.codexAuth`**
+(+ `~/.codex/auth.json` import, refresh at `exp − 60s`). OAuth uses the **published Codex-CLI app**
+(`client_id app_EMoamEEZ73f0Ck…`, loopback `:1455`, PKCE S256, originator `codex_cli_rs`). Full
+tool-calling parity, built **text-first**; `toolCalling` advertised true only once the Responses
+tool-mapper exists. **No consent gate** (matches the Codex CLI). Planned as PRD #11 / slices #13–#15.
+
+**Why:** the user wants to spend a ChatGPT subscription in Wisp, which only the subscription-backed
+path delivers — and that path is *not* Bearer-API-key + chat-completions, so the no-OAuth/one-client
+constraint had to give. Critically this is **not** the Copilot/Cursor failure mode: those were
+dropped for reverse-engineered impersonation of undocumented endpoints (ban risk); Codex uses
+OpenAI's **own published** Codex-CLI OAuth flow + endpoint, so the ToS posture is materially
+different. Copilot/Cursor stay dropped. The discriminated-row design keeps the "Active Provider is
+the single source of truth" model intact rather than spawning a parallel subsystem.
+
+**Reversibility:** the OAuth subsystem + Responses shim are additive (easy to drop the row). But the
+*supersession itself* is load-bearing — don't re-close the "no OAuth" door without re-reading this;
+the project now intentionally has two Provider kinds. Reference for the flow: `XETH--7` (mapped).
+
+## 2026-06-18 — OpenCode Zen/Go split (rename id + add the real Zen)
+
+**Decision:** The catalog row historically id'd `opencode-zen` actually targets `/zen/go/v1`, so
+**rename its id to `opencode-go`** (label "OpenCode Go", kept as default `PROVIDERS[0]`; base URL +
+`catalogKey: 'opencode-go'` unchanged → id now matches key) and **add a new `opencode-zen` row** for
+the real `/zen/v1` (`catalogKey: 'opencode'`, shared `OPENCODE_API_KEY`, bare ids assumed pending a
+build-time `GET /zen/v1/models` check). A second **one-time migration** moves the stored key +
+remembered model from the old `opencode-zen` slot to `opencode-go`, and the legacy `wisp.apiKey`
+shim is re-pointed at `opencode-go`. Planned as slice #12.
+
+**Why:** the id was a misnomer driving the id↔catalogKey mismatch that `gotchas.md` warns about;
+honest ids remove it. The stored key is provably a Go key (Wisp only ever talked to `/zen/go/v1`),
+so the move is unambiguous and safe — the same reasoning that justified the 2026-06-15 legacy-key
+shim. OpenCode Go stays the default because it is the proven endpoint and the new `/zen/v1` is
+unverified.
+
+**Reversibility:** easy (additive row + a pure migration planner) — but don't keep the misnamed id;
+the rename is the point.
+
+## 2026-06-18 — Zen/Go split built (slice #12); keyId shared-credential added
+
+**Decision:** Shipped the split per the entry above. Renamed `opencode-zen` → **`opencode-go`** ("OpenCode
+Go", default, id==catalogKey), added a new **`opencode-zen`** row at `/zen/v1` (`catalogKey: 'opencode'`,
+`defaultModel: claude-haiku-4-5`). New pure cores in `catalog.ts` (TDD, `npm test` 73/73): `planZenToGoMigration`
+(idempotent on go-slot-present; **moves** the old zen-slot key+model to the go slot and **clears** the zen
+slot) and `resolveKeyId`. `migrateLegacyKey` re-pointed to the go slot; `migrateZenToGo` runs **before** it
+on activate. `package.json` enum/default synced. **Live-verified** (`GET /zen/v1/models`, public): `/zen/v1`
+serves **bare** ids and is the **premium** Claude/GPT/Gemini catalog (distinct from Go's budget set).
+
+**Key addition not in the plan — `keyId` shared credential:** the new `opencode-zen` row sets
+`keyId: 'opencode-go'`. OpenCode Go and Zen are **one OpenCode account / one key, two endpoints**, so Zen
+**borrows Go's stored key** instead of demanding a second entry. Added pure `resolveKeyId` + a `keySlotFor`
+that routes every key get/store/delete/display through the borrowed slot.
+**Why:** F5 surfaced that the new keyless Zen row was **hidden** from the chat picker (`buildChatModelInfos`
+hides keyless Providers by design). Without `keyId` it would stay invisible until re-keyed — wrong, since the
+credential already exists in the go slot. This is also why the zen→go migration **deletes** the old zen slot:
+a Go key left there would feed the new `/zen/v1` row → 401.
+**Reversibility:** easy (`keyId` is an optional row field) — but don't drop it for the OpenCode rows; the
+shared-credential model is the point. See [[gotchas]].
 
 ## Related
 - [[overview]]

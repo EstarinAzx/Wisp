@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  resolveModel, resolveBaseUrl, planLegacyMigration,
+  resolveModel, resolveBaseUrl, resolveKeyId, planLegacyMigration, planZenToGoMigration,
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
   buildChatModelInfos, buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools,
   modelSupportsVision,
@@ -50,24 +50,62 @@ describe('resolveBaseUrl', () => {
 });
 
 describe('planLegacyMigration', () => {
-  // Idempotency: once the zen slot exists the migration already ran, so a re-run plans nothing —
+  // Idempotency: once the go slot exists the migration already ran, so a re-run plans nothing —
   // even if a stray legacy key is still readable. This is what makes it safe to run on every activate.
-  it('is a no-op when the zen key slot already exists', () => {
-    expect(planLegacyMigration({ zenKeyPresent: true, legacyKey: 'sk-old', legacyModel: 'minimax-m3' })).toBeNull();
+  it('is a no-op when the go key slot already exists', () => {
+    expect(planLegacyMigration({ goKeyPresent: true, legacyKey: 'sk-old', legacyModel: 'minimax-m3' })).toBeNull();
   });
 
   it('is a no-op when there is no legacy key to migrate', () => {
-    expect(planLegacyMigration({ zenKeyPresent: false, legacyKey: undefined, legacyModel: 'minimax-m3' })).toBeNull();
+    expect(planLegacyMigration({ goKeyPresent: false, legacyKey: undefined, legacyModel: 'minimax-m3' })).toBeNull();
   });
 
-  it('plans a key + model copy when a legacy key exists and zen has none', () => {
-    expect(planLegacyMigration({ zenKeyPresent: false, legacyKey: 'sk-old', legacyModel: 'minimax-m3' }))
-      .toEqual({ storeZenKey: 'sk-old', setModel: 'minimax-m3' });
+  it('plans a key + model copy when a legacy key exists and go has none', () => {
+    expect(planLegacyMigration({ goKeyPresent: false, legacyKey: 'sk-old', legacyModel: 'minimax-m3' }))
+      .toEqual({ storeGoKey: 'sk-old', setModel: 'minimax-m3' });
   });
 
   it('omits the model when no legacy model is remembered', () => {
-    expect(planLegacyMigration({ zenKeyPresent: false, legacyKey: 'sk-old', legacyModel: undefined }))
-      .toEqual({ storeZenKey: 'sk-old' });
+    expect(planLegacyMigration({ goKeyPresent: false, legacyKey: 'sk-old', legacyModel: undefined }))
+      .toEqual({ storeGoKey: 'sk-old' });
+  });
+});
+
+describe('planZenToGoMigration', () => {
+  // Idempotency guard: once the go slot is populated the move already ran, so a re-run plans nothing —
+  // even if a stray key still lingers in the zen slot. This is what makes it safe on every activate.
+  it('is a no-op when the go key slot already exists', () => {
+    expect(planZenToGoMigration({ goKeyPresent: true, zenSlotKey: 'sk-go', zenSlotModel: 'minimax-m3' })).toBeNull();
+  });
+
+  it('is a no-op when the zen slot holds no key to move', () => {
+    expect(planZenToGoMigration({ goKeyPresent: false, zenSlotKey: undefined, zenSlotModel: 'minimax-m3' })).toBeNull();
+  });
+
+  // The old `opencode-zen` slot held a GO key (its row pointed at /zen/go/v1). Move it to the go slot,
+  // carry the remembered model, and CLEAR the zen slot — else the genuinely-new Zen provider would
+  // inherit a Go key and 401 against /zen/v1. The clear is the safety point, not an optimization.
+  it('plans a key + model move and clears the zen slot', () => {
+    expect(planZenToGoMigration({ goKeyPresent: false, zenSlotKey: 'sk-go', zenSlotModel: 'minimax-m3' }))
+      .toEqual({ storeGoKey: 'sk-go', setModel: 'minimax-m3', clearZenSlot: true });
+  });
+
+  it('omits the model when the zen slot has none, still clearing the slot', () => {
+    expect(planZenToGoMigration({ goKeyPresent: false, zenSlotKey: 'sk-go', zenSlotModel: undefined }))
+      .toEqual({ storeGoKey: 'sk-go', clearZenSlot: true });
+  });
+});
+
+describe('resolveKeyId', () => {
+  // A plain row owns its own key slot/env.
+  it('defaults to the provider id', () => {
+    expect(resolveKeyId(provider({ id: 'groq', keyId: undefined }))).toBe('groq');
+  });
+
+  // OpenCode Zen and OpenCode Go are two endpoints of one OpenCode account (one key), so Zen borrows
+  // Go's slot via keyId instead of demanding a second entry — this is what makes Zen visible once Go is keyed.
+  it('uses keyId when the row borrows a sibling credential', () => {
+    expect(resolveKeyId(provider({ id: 'opencode-zen', keyId: 'opencode-go' }))).toBe('opencode-go');
   });
 });
 

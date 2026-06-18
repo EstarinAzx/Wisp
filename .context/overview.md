@@ -1,14 +1,14 @@
 ---
 type: overview
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-18
 tags: [context, overview]
 ---
 
 # Overview
 
 **Project:** wisp
-**One-liner:** **Wisp** — a VS Code extension that performs AI inline code **edits** (**Inquire**: type an instruction → the model returns SEARCH/REPLACE edit blocks over whole-file context, applied and reviewed as an in-editor accept/reject diff) routed through a **Provider catalog** of OpenAI-compatible backends — **9 built-ins** (OpenCode Zen default · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom** — with a Preact + Tailwind v4 side panel for switching the **Active Provider** and managing its per-Provider API key and model. **Wisp** is the product; each backend is a **Provider** (OpenCode Zen is the default, first one). _Ghost-text Completion was removed in slice #5 (2026-06-17); Wisp is Inquire-only._
+**One-liner:** **Wisp** — a VS Code extension that performs AI inline code **edits** (**Inquire**: type an instruction → the model returns SEARCH/REPLACE edit blocks over whole-file context, applied and reviewed as an in-editor accept/reject diff) routed through a **Provider catalog** of OpenAI-compatible backends — **10 built-ins** (OpenCode Go default · OpenCode Zen · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom** — with a Preact + Tailwind v4 side panel for switching the **Active Provider** and managing its per-Provider API key and model. **Wisp** is the product; each backend is a **Provider** (OpenCode Go is the default, first one; it and OpenCode Zen are two endpoints of the same OpenCode account, sharing one key). _Ghost-text Completion was removed in slice #5 (2026-06-17); Wisp is Inquire-only._
 
 ## Layout
 - `src/` — extension-host (Node) TypeScript. `extension.ts` (the Inquire command, commands, shared actions, status bar) + `sidePanelProvider.ts` (the WebviewView) + `catalog.ts` (vscode-free pure Provider-catalog data + resolvers + Inquire edit-prompt/reply helpers; the only unit-tested module, `catalog.test.ts`).

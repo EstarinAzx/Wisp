@@ -19,9 +19,13 @@ export type Provider = {
   baseUrl: string;       // hardcoded OpenAI-compatible base URL ('' for Custom — comes from settings)
   defaultModel: string;  // native-format model id used when the Provider has none remembered
   apiKeyEnv: string;     // env-var fallback for the key ('' = none, e.g. local Ollama)
-  // models.dev provider key for live context/vision (e.g. opencode-zen -> 'opencode-go', kilocode ->
+  // models.dev provider key for live context/vision (e.g. opencode-zen -> 'opencode', kilocode ->
   // 'kilo'). Omitted (local Ollama, Cline, Custom) -> no dynamic lookup; falls back to table/default.
   catalogKey?: string;
+  // Optional: the id whose key slot + env var this row borrows when it shares a credential with a
+  // sibling. Defaults to the row's own id. OpenCode Zen sets keyId='opencode-go' — both are the same
+  // OpenCode account (one key, two endpoints), so Zen reuses Go's stored key rather than asking twice.
+  keyId?: string;
   // Note: context/vision carry no per-row hints — both come from the ACTIVE model via models.dev
   // (catalogKey), else context = neutral default and vision = the modelSupportsVision heuristic.
 };
@@ -44,6 +48,11 @@ export const resolveModel = (modelMap: Record<string, string>, provider: Provide
 // workspace cannot redirect a built-in's bearer key to another endpoint.
 export const resolveBaseUrl = (provider: Provider, customBaseUrl: string): string =>
   provider.id === CUSTOM_ID ? customBaseUrl : provider.baseUrl;
+
+// The id whose key slot + env a Provider's key resolves from — its own id unless it borrows a sibling's
+// via keyId (OpenCode Zen → opencode-go). The caller builds the SecretStorage slot from this id, so a
+// shared credential is read/written/listed in one place and never asked for twice.
+export const resolveKeyId = (provider: Provider): string => provider.keyId ?? provider.id;
 
 // ----------------------------- Reply cleaners ----------------------------- //
 
@@ -382,12 +391,26 @@ export const assembleToolCalls = (deltas: ToolCallDelta[]): AssembledToolCall[] 
 // ----------------------------- Migration ----------------------------- //
 
 // Decide what the one-time pre-catalog migration should do, given the current storage state. Returns
-// null = no-op. The zen-slot-present check is the idempotency guard: once migrated the zen slot
-// exists, so every later activate plans nothing and the legacy key can never be lost or double-copied.
-// The caller performs the plan (store the zen key, optionally record the model, delete the legacy slot).
+// null = no-op. The go-slot-present check is the idempotency guard: once migrated the go slot exists,
+// so every later activate plans nothing and the legacy key can never be lost or double-copied. The
+// target is the go slot (not zen): the pre-catalog key predates the split, when the sole Provider was
+// the /zen/go/v1 endpoint, so it is provably a Go key. The caller performs the plan (store the go key,
+// optionally record the model, delete the legacy slot).
 export const planLegacyMigration = (
-  state: { zenKeyPresent: boolean; legacyKey?: string; legacyModel?: string },
-): { storeZenKey: string; setModel?: string } | null => {
-  if (state.zenKeyPresent || !state.legacyKey) return null;
-  return { storeZenKey: state.legacyKey, ...(state.legacyModel ? { setModel: state.legacyModel } : {}) };
+  state: { goKeyPresent: boolean; legacyKey?: string; legacyModel?: string },
+): { storeGoKey: string; setModel?: string } | null => {
+  if (state.goKeyPresent || !state.legacyKey) return null;
+  return { storeGoKey: state.legacyKey, ...(state.legacyModel ? { setModel: state.legacyModel } : {}) };
+};
+
+// Decide the one-time Zen→Go slot migration when the misnamed `opencode-zen` row is renamed to
+// `opencode-go`. The old `opencode-zen` slot held a GO key (that row pointed at /zen/go/v1), so the key
+// is provably a Go key, not a guess. Move it to the go slot, carry the remembered model, and CLEAR the
+// zen slot — otherwise the genuinely-new `opencode-zen` row (/zen/v1) would inherit the Go key and 401.
+// goKeyPresent is the idempotency guard (mirrors planLegacyMigration): once go is populated, plan null.
+export const planZenToGoMigration = (
+  state: { goKeyPresent: boolean; zenSlotKey?: string; zenSlotModel?: string },
+): { storeGoKey: string; setModel?: string; clearZenSlot: true } | null => {
+  if (state.goKeyPresent || !state.zenSlotKey) return null;
+  return { storeGoKey: state.zenSlotKey, ...(state.zenSlotModel ? { setModel: state.zenSlotModel } : {}), clearZenSlot: true };
 };
