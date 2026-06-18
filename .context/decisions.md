@@ -1,7 +1,7 @@
 ---
 type: decisions
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-19
 tags: [context, decisions]
 ---
 
@@ -392,6 +392,197 @@ fallback signal, and the failure modes differ: a wrong context window is just a 
 guessed vision flag would send images a backend rejects. `npm test` 67/67.
 **Reversibility:** easy (the table was pure data) — but don't re-add a context guess; models.dev or
 neutral default is the intended behaviour.
+
+## 2026-06-18 — Codex Provider: supersede the no-OAuth ADR (subscription-backed)
+
+**Decision:** Add a **Codex Provider** — a new Provider *kind* reached by ChatGPT-account
+**OAuth sign-in**, running OpenAI's Codex models on the user's subscription via the **Responses
+API** (`/backend-api/codex/responses`, SSE), on **both** surfaces (Inquire + LM Chat Provider).
+This **supersedes the 2026-06-15 "no OAuth subsystem / OpenAI-chat-only" decision** for the Codex
+case. Modeled as a discriminated **`kind: 'openai-chat' | 'codex'`** catalog row so selection /
+panel / model-memory / chat-enumeration are reused; only **auth**, **request transport**, and the
+**"usable"** test branch on kind. Pure logic (Responses reducer, request builder, JWT parse +
+refresh, `~/.codex/auth.json` parser, codex-usable branch) in `catalog.ts` (TDD); impure OAuth/IO +
+Responses shim in new `codexAuth.ts` / `codexClient.ts`. Tokens in **SecretStorage `wisp.codexAuth`**
+(+ `~/.codex/auth.json` import, refresh at `exp − 60s`). OAuth uses the **published Codex-CLI app**
+(`client_id app_EMoamEEZ73f0Ck…`, loopback `:1455`, PKCE S256, originator `codex_cli_rs`). Full
+tool-calling parity, built **text-first**; `toolCalling` advertised true only once the Responses
+tool-mapper exists. **No consent gate** (matches the Codex CLI). Planned as PRD #11 / slices #13–#15.
+
+**Why:** the user wants to spend a ChatGPT subscription in Wisp, which only the subscription-backed
+path delivers — and that path is *not* Bearer-API-key + chat-completions, so the no-OAuth/one-client
+constraint had to give. Critically this is **not** the Copilot/Cursor failure mode: those were
+dropped for reverse-engineered impersonation of undocumented endpoints (ban risk); Codex uses
+OpenAI's **own published** Codex-CLI OAuth flow + endpoint, so the ToS posture is materially
+different. Copilot/Cursor stay dropped. The discriminated-row design keeps the "Active Provider is
+the single source of truth" model intact rather than spawning a parallel subsystem.
+
+**Reversibility:** the OAuth subsystem + Responses shim are additive (easy to drop the row). But the
+*supersession itself* is load-bearing — don't re-close the "no OAuth" door without re-reading this;
+the project now intentionally has two Provider kinds. Reference for the flow: `XETH--7` (mapped).
+
+## 2026-06-18 — OpenCode Zen/Go split (rename id + add the real Zen)
+
+**Decision:** The catalog row historically id'd `opencode-zen` actually targets `/zen/go/v1`, so
+**rename its id to `opencode-go`** (label "OpenCode Go", kept as default `PROVIDERS[0]`; base URL +
+`catalogKey: 'opencode-go'` unchanged → id now matches key) and **add a new `opencode-zen` row** for
+the real `/zen/v1` (`catalogKey: 'opencode'`, shared `OPENCODE_API_KEY`, bare ids assumed pending a
+build-time `GET /zen/v1/models` check). A second **one-time migration** moves the stored key +
+remembered model from the old `opencode-zen` slot to `opencode-go`, and the legacy `wisp.apiKey`
+shim is re-pointed at `opencode-go`. Planned as slice #12.
+
+**Why:** the id was a misnomer driving the id↔catalogKey mismatch that `gotchas.md` warns about;
+honest ids remove it. The stored key is provably a Go key (Wisp only ever talked to `/zen/go/v1`),
+so the move is unambiguous and safe — the same reasoning that justified the 2026-06-15 legacy-key
+shim. OpenCode Go stays the default because it is the proven endpoint and the new `/zen/v1` is
+unverified.
+
+**Reversibility:** easy (additive row + a pure migration planner) — but don't keep the misnamed id;
+the rename is the point.
+
+## 2026-06-18 — Zen/Go split built (slice #12); keyId shared-credential added
+
+**Decision:** Shipped the split per the entry above. Renamed `opencode-zen` → **`opencode-go`** ("OpenCode
+Go", default, id==catalogKey), added a new **`opencode-zen`** row at `/zen/v1` (`catalogKey: 'opencode'`,
+`defaultModel: claude-haiku-4-5`). New pure cores in `catalog.ts` (TDD, `npm test` 73/73): `planZenToGoMigration`
+(idempotent on go-slot-present; **moves** the old zen-slot key+model to the go slot and **clears** the zen
+slot) and `resolveKeyId`. `migrateLegacyKey` re-pointed to the go slot; `migrateZenToGo` runs **before** it
+on activate. `package.json` enum/default synced. **Live-verified** (`GET /zen/v1/models`, public): `/zen/v1`
+serves **bare** ids and is the **premium** Claude/GPT/Gemini catalog (distinct from Go's budget set).
+
+**Key addition not in the plan — `keyId` shared credential:** the new `opencode-zen` row sets
+`keyId: 'opencode-go'`. OpenCode Go and Zen are **one OpenCode account / one key, two endpoints**, so Zen
+**borrows Go's stored key** instead of demanding a second entry. Added pure `resolveKeyId` + a `keySlotFor`
+that routes every key get/store/delete/display through the borrowed slot.
+**Why:** F5 surfaced that the new keyless Zen row was **hidden** from the chat picker (`buildChatModelInfos`
+hides keyless Providers by design). Without `keyId` it would stay invisible until re-keyed — wrong, since the
+credential already exists in the go slot. This is also why the zen→go migration **deletes** the old zen slot:
+a Go key left there would feed the new `/zen/v1` row → 401.
+**Reversibility:** easy (`keyId` is an optional row field) — but don't drop it for the OpenCode rows; the
+shared-credential model is the point. See [[gotchas]].
+
+## 2026-06-19 — Codex tracer built (slice #13); live round-trip resolved the request contract
+
+**Decision:** Shipped the Codex Provider tracer per the 2026-06-18 ADR. New pure cores in `catalog.ts`
+(TDD, `npm test` 111/111): `Provider.kind`, `isCodexProvider`, `isCodexSignedIn`, `buildCodexResponsesBody`,
+`reduceResponsesTextEvents`/`extractResponsesText`, the JWT pair `decodeJwtPayload`/`parseChatgptAccountId`
++ `shouldRefreshCodexToken` (60s skew), `parseCodexAuthJson`, `codexReasoning`, `CODEX_MODELS`. New impure
+`codexAuth.ts` (PKCE S256, loopback `:1455` + ephemeral fallback, token exchange, SecretStorage
+`wisp.codexAuth`, `~/.codex/auth.json` import, refresh) + `codexClient.ts` (raw `/responses` fetch,
+SSE→text). `extension.ts` branches Inquire on `kind` (codex → Responses, else OpenAI SDK), adds
+`wisp.codexSignIn`/`wisp.codexSignOut`, and treats codex as usable-when-signed-in (no key field). Panel
+swaps the key field for sign-in/out + a curated Codex model dropdown. **F5 live round-trip PASSED.**
+
+**Live-resolved request contract (the tracer's whole point — these were unknowns until F5):**
+- **Bearer = the OAuth `access_token`** against `https://chatgpt.com/backend-api/codex/responses` (the
+  *subscription* path), NOT the id_token→`sk-` exchanged apiKey (that targets `api.openai.com`, a different
+  endpoint + billing). Headers: `chatgpt-account-id` (hard-required — error early if absent), `originator:
+  codex_cli_rs`, `OpenAI-Beta: responses=experimental`, `session_id`.
+- **Reasoning models REQUIRE `reasoning: { effort, summary:'auto' }`** on the body or they 400; non-reasoning
+  models reject it. `codexReasoning(model)` sends `medium` for gpt-5/o, omits for gpt-4.x/spark.
+- **`gpt-5-codex` is a dead id** (400). Default is now **`gpt-5.3-codex`**; the dropdown offers the current
+  curated lineup (no `/models` route exists on the Codex backend).
+**Why these aren't guesses:** confirmed by the F5 round-trip + cross-checked against the working `XETH--7`
+reference (`codexShim.ts` `performCodexRequest`, `providerConfig.ts` reasoning map).
+
+**Sign-out tombstone (non-obvious):** `signOut` writes an **empty `{}` tombstone** to `wisp.codexAuth`
+rather than deleting the slot. Deleting let `current()`/`isSignedIn()` **re-import `~/.codex/auth.json`** on
+the next render, so a Codex-CLI user could never sign out (it snapped back to signed-in). The tombstone is a
+present-but-bearer-less blob → reads as signed-out AND suppresses the import until an explicit sign-in.
+
+**Native chat picker deferred to #14:** Codex is intentionally **absent** from VS Code's Language Models /
+Ctrl+I picker in #13. It's keyless (hidden by `buildChatModelInfos`), and that surface streams through the
+OpenAI **chat-completions** client which 404s against `/responses`. Making it visible *and working* there is
+slice #14 (advertise-when-signed-in + a Responses **streaming** branch) — visibility without the stream is a
+dead pick, so the two ship together.
+
+**Reversibility:** the Codex modules are additive (drop the row + the two files). But the access_token-bearer,
+reasoning-required, dead-`gpt-5-codex`, and sign-out-tombstone facts are load-bearing — they're the live
+contract, not preferences; don't "simplify" them away. See [[gotchas]].
+
+## 2026-06-19 — Codex in native chat (slice #14): visible + streaming, on real caps + vision
+
+**Decision:** Surface Codex on VS Code's native chat / Ctrl+I picker, streaming text through the Responses
+API. `keyed[codex] = codexAuth.isSignedIn()` advertises the row when signed in; a new **`codexStream`**
+async-generator (`codexClient.ts`) yields `response.output_text.delta` text live into the chat surface,
+reusing the pure **`parseSseBlock`** (extracted from the non-streaming reader — one SSE parser) and a
+shared `codexResponsesRequest` helper. `chatProvider.ts` branches `provideLanguageModelChatResponse` on
+`isCodexProvider`. New pure cores in `catalog.ts` (TDD, `npm test` **121/121**); F5 verified end-to-end.
+
+**Four load-bearing sub-decisions:**
+1. **Codex advertises `toolCalling: true` — reverses #14's own acceptance #3 ("advertise false").**
+   VS Code **hard-filters the picker on `toolCalling`**: a model without it is invisible *everywhere*
+   (Ask mode + Manage Models too, F5-confirmed; docs: "if the model doesn't support tool calling, it
+   won't be shown in the model picker"). So #1 (appears in picker) and #3 (false) are mutually exclusive —
+   the user chose visibility. Tools are **not forwarded yet** (`options.tools` ignored → model answers as
+   text); real tool calling is **#15**. The honesty gap is bounded (degrades to text, no crash).
+2. **The Codex `/responses` backend REQUIRES a non-empty `instructions`** (400 "Instructions are required").
+   `buildCodexResponsesBody` now defaults `"You are a helpful coding assistant."` when no system turn —
+   the native-chat path has none (VS Code's chat API has no System role; Inquire always supplies one, so it
+   never hit this). `CodexResponsesBody.instructions` is now required, not optional.
+3. **Assistant turns serialize as `output_text`** (user/system stay `input_text`) — the Responses API
+   rejects the wrong content type on a replayed assistant message. Was `input_text` for all roles.
+4. **`codexModelCaps` — real windows + vision — partially reopens the 2026-06-18 "drop the context guess
+   table" door, scoped to Codex.** gpt-5.x family = **400K/32K**, o-series = **200K/100K**, `vision: true`.
+   Justified: Codex has **no models.dev catalogKey and no `/models` route**, so the live-caps path that
+   retired the table can't reach these ids — a small codex-only table is the *only* source of real numbers,
+   and they're authoritative (models.dev/api.json via XETH-7), not guesses. **Vision corrects a mid-session
+   error:** I first called Codex text-only (trusting Copilot's conservative `modalities` flag), but XETH-7's
+   codexShim forwards `input_image` to the *same* backend → vision is real. Images now ride as `input_image`
+   data-URIs (`buildCodexResponsesBody` + `toCodexMessages`).
+
+**Why these aren't guesses:** the instructions-required, output_text, and 400-on-omit facts are the live
+request contract (F5 + cross-checked against XETH-7 `codexShim.ts`); the caps numbers are models.dev data.
+
+**Reversibility:** the streaming branch + caps function are additive (easy to drop). But the four sub-facts
+are load-bearing contract, not preferences — don't "simplify" `instructions` back to omittable, assistant
+back to `input_text`, or re-close the codex caps as the neutral default. The `toolCalling:true` advertise is
+the one to revisit *with* #15 (once tools are forwarded it becomes fully honest). Reference: `XETH--7`
+`codexShim.ts` (`convertContentBlocksToResponsesParts`, `input_image`, instructions handling). See [[gotchas]].
+
+## 2026-06-19 — Codex tool-calling parity (slice #15): the toolCalling flag is now honest
+
+**Decision:** Wire real tool calling for the Codex chat branch — forward agent tools and round-trip tool
+calls/results — making the `toolCalling: true` flag (flipped in #14 only for picker visibility) **honest**.
+Three new/extended pure cores in `catalog.ts` (TDD, `npm test` **137/137**) + a stream-type widening:
+1. **`toCodexResponsesTools`** — VS Code tool defs → **flat** Responses function tools
+   (`{type,name,description,parameters,strict:true}`, unlike chat completions' nested `function` object).
+   A self-contained recursive `enforceStrictResponsesSchema` closes every object
+   (`additionalProperties:false`) and lists **all** its keys in `required` — Codex **strict** tools reject
+   any open/partial object. (Mirrors XETH-7 `convertToolsToResponsesTools`, minus its
+   `sanitizeSchemaForOpenAICompat`/`uri`-format/empty-record edge handling — not needed for VS Code tools.)
+2. **`reduceResponsesToolCalls`** — the Responses analogue of `assembleToolCalls`. Accumulates
+   `response.output_item.added` (function_call id/call_id/name + optional initial args) +
+   `response.function_call_arguments.delta` (arg fragments) keyed by **item id**, and surfaces **call_id**
+   as the round-trip id. Returns `AssembledToolCall[]` (reusing #14's type).
+3. **`buildCodexResponsesBody` extended** — assistant tool calls → `function_call` input items, tool
+   results → `function_call_output` items, ordered per API (function_call_output **before** the next user
+   message). `tools`/`tool_choice`/`parallel_tool_calls` ride only when tools are non-empty (a bare
+   tool_choice with no tools 400s). The old empty-text message fallback is gone: a message item is emitted
+   only when it has parts, so a tool-only turn yields just its function_call / function_call_output items.
+4. **`codexStream` yield `string` → `CodexStreamEvent` union** (`{type:'text'} | {type:'toolCall'}`).
+   Function-call events stream interleaved with text but can't be emitted until whole, so they are collected
+   and folded by the reducer at stream end (the chat-completions assemble-at-end pattern). `chatProvider`
+   threads `options.tools`/`toolMode` in and maps the union to `LanguageModelTextPart` /
+   `LanguageModelToolCallPart`; `toCodexMessages` now carries `toolCalls`/`toolResults`.
+
+**The load-bearing live finding — replayed `function_call` items need only `call_id`, NOT `id`:** the F5
+round-trip succeeded sending the `function_call` input item with **`call_id` only** (the documented
+stateless Responses contract). XETH-7 additionally sends a derived `id` (`fc_…`); it is **unnecessary** here
+(`store:false` is stateless, so there is no prior server item to reference). Kept call_id-only per CLAUDE.md
+simplicity. If a future round-trip 400s, adding `id` to the item is the one-line fix — see [[gotchas]].
+
+**Why:** #14 made the `toolCalling` flag a bounded white lie (advertised true for visibility; tools ignored
+→ Codex answered as text). #15 forwards the tools and round-trips the results, so agent mode actually drives
+Codex — closing the honesty gap. **F5 PASSED:** Codex (gpt-5.5) fired **5 parallel `Read` tool calls** in
+one turn, VS Code ran them, results round-tripped, and the summary reflected the real file contents — proving
+the model→tool→result→continue loop *and* that call_id-only is sufficient.
+
+**Reversibility:** the cores are additive (easy to drop). But the strict-schema enforcement and the
+call_id-only round-trip are the live contract — don't loosen strict (Codex 400s open objects) or "simplify"
+by also re-closing the empty-text message fallback (it would emit empty messages on tool-only turns).
+Reference: `XETH--7` `codexShim.ts` (`convertToolsToResponsesTools`, `convertAnthropicMessagesToResponsesInput`,
+the `output_item.added` / `function_call_arguments.delta` handling). See [[gotchas]].
 
 ## Related
 - [[overview]]

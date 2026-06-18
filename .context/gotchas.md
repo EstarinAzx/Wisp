@@ -1,7 +1,7 @@
 ---
 type: gotchas
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-19
 tags: [context, gotchas]
 ---
 
@@ -29,7 +29,17 @@ The extension references the webview bundle by fixed path (`main.js` / `main.css
 Never post the API key value back to the webview — only a `keyIsSet` boolean. Invalidate the cached OpenAI client whenever the key is set or cleared.
 
 ### Model ids are BARE on `zen/go/v1` — the `opencode/` prefix is rejected
-The chat endpoint returns `401 Model opencode/minimax-m3 is not supported` for a provider-prefixed id. Use the **bare** id exactly as `GET /models` serves it (`minimax-m3`, `glm-5`, `kimi-k2.6`, …). `DEFAULT_MODEL`, the setting default, and `fetchModelIds` must all stay bare. The `opencode/<id>` form (from the reference `llm-provider` and the public docs) does **not** work against this gateway — it had inline completions silently erroring the whole time. See [[decisions]].
+The chat endpoint returns `401 Model opencode/minimax-m3 is not supported` for a provider-prefixed id. Use the **bare** id exactly as `GET /models` serves it (`minimax-m3`, `glm-5`, `kimi-k2.6`, …). `DEFAULT_MODEL`, the setting default, and `fetchModelIds` must all stay bare. The `opencode/<id>` form (from the reference `llm-provider` and the public docs) does **not** work against this gateway — it had inline completions silently erroring the whole time. The sibling **`/zen/v1`** (OpenCode Zen, added in #12) also serves **bare** ids (verified 2026-06-18 against its public `GET /zen/v1/models`) — but a **different, premium** model set (Claude/GPT/Gemini), not Go's budget ids. See [[decisions]].
+
+### A shared-credential Provider must set `keyId` or it's hidden from the chat picker
+`buildChatModelInfos` only advertises **keyed** Providers (a keyless row would be a dead pick). So a new
+row that shares another row's credential is **invisible** until it has its own key — even though the
+credential already exists. **OpenCode Go + OpenCode Zen are one OpenCode account / one key, two endpoints**
+(`/zen/go/v1` vs `/zen/v1`); the Zen row sets **`keyId: 'opencode-go'`** so it borrows Go's stored key via
+`resolveKeyId`/`keySlotFor`. This also dictated the #12 migration: the zen→go move **deletes** the old
+`opencode-zen` slot, because a Go key left in it would be inherited by the new `/zen/v1` row → 401. When
+adding any Provider that shares an existing account's key, set `keyId` — don't make the user enter it twice.
+See [[decisions]] 2026-06-18 Zen/Go-split-built entry.
 
 ### Served models are reasoning models — strip `<think>` and DON'T cap tokens
 Most `zen/go` ids (minimax-m3, mimo, qwen3*, glm5*) emit chain-of-thought **inline** as `<think>…</think>`, then the real answer. Two consequences: (1) `stripThink` (in `src/catalog.ts`, composed into `extractEditText`) must drop the block (and treat an unterminated `<think>` as "no answer yet" → return nothing) or the Inquire edit is the model's thinking; (2) a low `max_tokens` cap starves the answer — the model spends the budget thinking and never reaches code. `maxTokens` default is therefore `0` (uncapped); `max_tokens` is omitted from the request unless set `>0`. For snappy edits use a non-reasoning id (`deepseek-v4-flash`, `kimi-k2.6`). See [[decisions]].
@@ -93,6 +103,76 @@ wrong-region false match. The fuzzy-matching fork is deferred; take it only if m
 real use. The throwaway `[debug]` reply/`trimmedMatch` instrumentation in `inquire` (used to tell
 indent-drift from paraphrase) was removed after diagnosis — re-add it the same way if revisiting. See
 [[decisions]] 2026-06-17 edit-blocks-built entry.
+
+### Codex: bearer is the access_token, NOT the exchanged API key
+For the subscription path (`https://chatgpt.com/backend-api/codex/responses`), the bearer is the OAuth
+**`access_token`** + the `chatgpt-account-id` header. The id_token→`sk-` exchange (`exchangeCodexIdTokenForApiKey`
+in the reference) produces an **API-platform** key billed against `api.openai.com` — a *different* endpoint. Wisp
+keeps `apiKey` only as a fallback; `codexClient` sends `creds.accessToken || creds.apiKey`. Don't switch the
+default bearer to the exchanged key — it routes off the subscription. `chatgpt-account-id` is **hard-required**:
+absent → error early (`codexClient` throws) rather than send a header-less request that 401/403s opaquely.
+
+### Codex reasoning models REQUIRE a `reasoning` object — and `gpt-5-codex` is a dead id
+The Codex `/responses` backend **400s** a gpt-5/o-series request that omits `reasoning: { effort, summary:'auto' }`,
+and **400s** a gpt-4.x/spark request that *includes* it — so it's per-model (`codexReasoning` in `catalog.ts`:
+`medium` for gpt-5/o, undefined for gpt-4.x/`*-spark`). Separately, **`gpt-5-codex` is not a valid model id**
+(400); the live lineup is `gpt-5.5`/`gpt-5.4`/`gpt-5.3-codex`/`gpt-5.3-codex-spark`/`gpt-5.2-codex`/
+`gpt-5.1-codex-max`/`gpt-5.1-codex-mini`/`gpt-5.4-mini`/`o3`/`o4-mini` (the codex row default is `gpt-5.3-codex`).
+There is **no `/models` route** on the Codex backend, so the dropdown uses the hardcoded `CODEX_MODELS` list,
+not a live fetch. Both confirmed by the #13 F5 round-trip. See [[decisions]] 2026-06-19.
+
+### Codex sign-out must write a tombstone, not delete the slot
+`CodexAuth.signOut` stores an empty `{}` to `wisp.codexAuth` instead of `secrets.delete`. If it deleted, the
+next `current()`/`isSignedIn()` would **re-import `~/.codex/auth.json`** (a Codex-CLI login) and instantly
+re-sign-in — sign-out would never stick for a CLI user. A present-but-bearer-less blob reads as signed-out
+*and* suppresses the import. Only an **unwritten** slot (undefined) triggers the one-time auth.json import; a
+tombstone does not. Don't "simplify" sign-out back to a delete.
+
+### The chat/Ctrl+I picker hard-filters on `toolCalling` — a text-only model is INVISIBLE
+VS Code shows ONLY tool-capable models in the chat / Ctrl+I / agent picker. A model advertising
+`toolCalling: false` is absent **everywhere** the picker appears — Ask mode included; it shows up **only** in
+the Manage Models list (which lists every registered model, regardless of capability). Docs: "if the model
+doesn't support tool calling, it won't be shown in the model picker" (confirmed by #14 F5). Consequence:
+**Codex advertises `toolCalling: true` so it is selectable**, and as of #15 the flag is **honest** (tools are
+forwarded + round-tripped). `buildChatModelInfos` sets `toolCalling: true` for every row. Don't set it false
+for a model you still want selectable. (`imageInput`/vision is NOT filtered on — only `toolCalling`.)
+
+### Codex `/responses` requires a non-empty `instructions` — default it for native chat
+The backend **400s "Instructions are required"** if `instructions` is absent or empty. Inquire never hit this
+(`buildEditPrompt` always emits a system message), but the native-chat path has **no System role** (VS Code's
+chat API only has User/Assistant), so it sent none → 400. `buildCodexResponsesBody` now **defaults**
+`"You are a helpful coding assistant."` when no system turn is present; `CodexResponsesBody.instructions` is
+required, not optional. Don't make it omittable again.
+
+### Codex Responses input: assistant content is `output_text`, user/system is `input_text`
+A replayed **assistant** turn's content part must be typed `output_text`; user/system stay `input_text`. The
+Responses API rejects the wrong type. `buildCodexResponsesBody` picks per role. Images (`input_image`) ride
+only on non-assistant turns (the API rejects `input_image` on assistant items). Mirrors XETH-7's codexShim
+`convertContentBlocksToResponsesParts`.
+
+### Codex caps come from `codexModelCaps`, not models.dev — and it IS vision-capable
+The Codex row has no models.dev `catalogKey` and the backend has no `/models` route, so the live-caps path
+(which retired the context guess table) can't reach these ids. `codexModelCaps` (in `catalog.ts`) supplies
+real windows — gpt-5.x **400K/32K**, o-series **200K/100K** — and `vision: true`. `chatProvider`'s caps
+resolver routes codex rows to it. **Vision is real**: gpt-5/o are multimodal and the Codex backend accepts
+`input_image` (XETH-7's codexShim forwards it to the same endpoint) — don't be misled by Copilot's
+conservative `modalities: ['text']` registry flag, which understates it. This is the one place a small
+codex-only caps table is intentional (see [[decisions]] 2026-06-19); don't fold codex back to the neutral
+default.
+
+### Codex tools must be STRICT, and a replayed `function_call` needs only `call_id` (not `id`)
+Two facts for the #15 agent round-trip. **(1) Strict schemas:** `toCodexResponsesTools` runs every tool's
+`inputSchema` through `enforceStrictResponsesSchema` — every object gets `additionalProperties:false` and
+**all** its keys listed in `required` (recursively, incl. array `items` and `anyOf/oneOf/allOf`), and the
+tool carries `strict:true`. Codex strict mode **rejects** an open or partially-required object. The tool is
+**flat** (`{type,name,description,parameters,strict}`), NOT chat-completions' nested `function` object —
+don't reuse `toOpenAiTools` for Codex. **(2) call_id-only round-trip:** the replayed `function_call` input
+item carries **`call_id`, name, arguments** — **no `id`**. With `store:false` the request is stateless, so
+there is no prior server item for an `id` to reference; the F5 round-trip succeeded sending call_id-only.
+XETH-7 *also* sends a derived `id` (`fc_…`) — unnecessary here. If a future multi-turn flow 400s on the
+round-trip, add `id` to the `function_call` item in `buildCodexResponsesBody` (one line). The reducer
+(`reduceResponsesToolCalls`) keys streamed events by the **item id** but surfaces **call_id** as the
+round-trip id — that is what `function_call_output.call_id` must match. See [[decisions]] 2026-06-19.
 
 ## Related
 - [[api]]

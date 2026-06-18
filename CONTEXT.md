@@ -19,8 +19,9 @@ reserve **Wisp** for user-facing chrome and the product-vs-**Provider** split.
 
 **Provider**:
 The external backend Wisp routes **Inquire** requests through
-— an OpenAI-compatible chat endpoint plus the credentials to reach it (base URL
-+ API key). Wisp is **provider-agnostic**: a Provider is a swappable role, not a
+— a chat endpoint plus the credentials to reach it: for most Providers an
+OpenAI-compatible base URL + API key, or — for a **Codex Provider** — an OAuth
+sign-in. Wisp is **provider-agnostic**: a Provider is a swappable role, not a
 fixed dependency. Wisp ships a **Provider catalog** of several; exactly one is the
 **Active Provider** at a time. Providers carry a **canonical vendor name** (e.g.
 "OpenCode Zen", "Groq", "Mistral", "KiloCode"). _Avoid_: treating the Provider as
@@ -47,12 +48,32 @@ hatch: the user supplies base URL and model themselves, for any OpenAI-compatibl
 endpoint not in the catalog. _Avoid_: exposing a built-in's base URL as
 user-editable — it is fixed on purpose (a security property; see `gotchas.md`).
 
-**OpenCode Zen**:
-The **default** Provider and first catalog entry — the OpenAI-compatible chat
-endpoint at `https://opencode.ai/zen/go/v1`, with the `OPENCODE_API_KEY`
-environment-variable fallback. Canonically **"OpenCode Zen"** (vendor *OpenCode* + product
-*Zen*) — never bare "OpenCode" or "Zen". The product *has* a Provider; the
-Provider keeps its own name. _Avoid_: calling the product "OpenCode".
+**Provider kind**:
+The two shapes a Provider can take. An **API-key Provider** (every catalog entry
+but one) reaches an OpenAI-compatible chat endpoint with a Bearer API key. A
+**Codex Provider** is reached by **signing in** with a ChatGPT account instead of
+a key, and runs OpenAI's Codex models against that account's subscription. _Avoid_:
+treating a Codex Provider as just another keyed row — it authenticates by sign-in,
+not a key, and its endpoint is not OpenAI chat-completions (see `gotchas.md`).
+
+**Codex Provider**:
+The Provider reached by **signing in to Codex** (a ChatGPT-account OAuth flow)
+rather than supplying an API key — it runs OpenAI's Codex models on the user's
+own ChatGPT subscription. It is **built-in** (its endpoint is fixed in code) but
+credentialed by sign-in, not a key. Whether the user is **signed in** (not
+whether a key is set) is what makes it usable. _Avoid_: calling it an API-key
+Provider, or implying it uses Wisp's own account — it is the user's subscription.
+
+**OpenCode Go** / **OpenCode Zen**:
+Two distinct **Providers** from the vendor *OpenCode*, told apart by endpoint.
+**OpenCode Go** is the **default** and first catalog entry — the OpenAI-compatible
+chat endpoint at `https://opencode.ai/zen/go/v1`, with the `OPENCODE_API_KEY`
+environment-variable fallback. **OpenCode Zen** is the sibling endpoint at
+`https://opencode.ai/zen/v1`. Both are canonically two words (vendor *OpenCode* +
+the variant) — never bare "OpenCode" or "Zen". The product *has* these Providers;
+each keeps its own name. _Avoid_: calling the product "OpenCode"; conflating the
+two — "OpenCode Zen" historically (mis)named the **Go** endpoint, but they are now
+separate Providers with the *Zen* name belonging to `/zen/v1`.
 
 ### Activity — what the extension is doing right now
 

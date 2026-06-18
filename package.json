@@ -53,6 +53,14 @@
       {
         "command": "wisp.inquire",
         "title": "Wisp: Inquire"
+      },
+      {
+        "command": "wisp.codexSignIn",
+        "title": "Wisp: Sign in to Codex"
+      },
+      {
+        "command": "wisp.codexSignOut",
+        "title": "Wisp: Sign out of Codex"
       }
     ],
     "menus": {
@@ -78,9 +86,11 @@
         "wisp.provider": {
           "type": "string",
           "scope": "machine",
-          "default": "opencode-zen",
+          "default": "opencode-go",
           "enum": [
+            "opencode-go",
             "opencode-zen",
+            "codex",
             "openai",
             "groq",
             "mistral",
@@ -91,7 +101,7 @@
             "cline",
             "custom"
           ],
-          "description": "Active Provider — which Provider's base URL your API key is sent to. 'custom' uses wisp.baseUrl. Machine-scoped because selecting a Provider selects where your bearer key is sent, so a workspace must not be able to redirect it. Unknown values fall back to opencode-zen."
+          "description": "Active Provider — which Provider's base URL your API key is sent to. 'custom' uses wisp.baseUrl. Machine-scoped because selecting a Provider selects where your bearer key is sent, so a workspace must not be able to redirect it. Unknown values fall back to opencode-go."
         },
         "wisp.baseUrl": {
           "type": "string",

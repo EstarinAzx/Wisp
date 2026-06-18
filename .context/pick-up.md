@@ -1,7 +1,7 @@
 ---
 type: pick-up
 project: wisp
-updated: 2026-06-18
+updated: 2026-06-19
 tags: [context, pick-up]
 ---
 
@@ -9,31 +9,31 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate.
 
-**Last session (2026-06-18):** Built **slice #7 — the Language Model Chat Provider** (`src/chatProvider.ts`):
-Wisp's keyed Providers now show as models in VS Code's **native** chat / Ctrl+I (vendor `wisp`), streaming
-through Wisp's own OpenAI client. Then, per user asks, added **tool calling** (forward `options.tools`,
-emit `LanguageModelToolCallPart`), **vision** (image parts → `image_url` data URIs), and **live per-model
-context/vision from models.dev** (`src/modelsDev.ts`; heuristics demoted to fallback), and fixed the
-context **decomposition** so VS Code's summed "Context Size" shows the real window (kimi 256K, not 524K).
-**Released v1.0.0** — `CHANGELOG.md`, GitHub release `v1.0.0` + `wisp-1.0.0.vsix`. `npm test` 70/70,
-`npm run compile` clean. Merged to `main` via PR; you're on `main`, clean.
+**Last session (2026-06-19):** Built + shipped **slice #15 — Codex tool-calling parity (agent mode)** on
+branch **`feat/codex-tracer`**. The codex chat branch now **forwards agent tools and round-trips tool
+calls/results**, so the `toolCalling: true` flag (flipped in #14 for picker visibility) is now **honest**.
+New pure cores in `catalog.ts` (TDD): `toCodexResponsesTools` (+ recursive strict-schema enforcer),
+`reduceResponsesToolCalls` (Responses analogue of `assembleToolCalls`), and `buildCodexResponsesBody`
+extended to serialize `function_call` / `function_call_output` round-trip items. `codexStream`
+(`codexClient.ts`) yield widened `string` → **`CodexStreamEvent`** union; `chatProvider` threads tools in
+and emits text / tool-call parts. **`npm test` 137/137, tsc+webview+vite clean, F5 PASSED** — Codex fired
+5 parallel `Read` tool calls, results round-tripped, summary reflected real file contents.
 
-**Next task: OPEN / user-led.** The #3 inline-chat pivot epic is fully done. No committed next task.
-- If the user wants polish: the **strip-guess-tables** decision is still open (delete `CONTEXT_TABLE` +
-  `VISION_FAMILIES` so the only fallback is a neutral default — user leaned toward keeping them).
-- Carried backlog: verify the 3 ⚠ `defaultModel`s once keys exist; README pass.
-- New feature → `superpowers:brainstorming`, then `/preset init` or `to-prd`/`to-issues`.
+**This completes PRD #11 (slices #12–#15).** The Codex Provider + OpenCode Zen/Go batch is feature-complete.
 
-**Landmines (see [[gotchas]] + [[decisions]]):**
-- **models.dev key = base-URL match, NOT name.** `opencode-zen` (`.../zen/go/v1`) → **`opencode-go`**
-  (NOT `opencode`, which is `.../zen/v1`); `kilocode` → **`kilo`**. Wrong key = silent table fallback.
-- **Local Ollama, Cline, Custom are absent from models.dev** → no `catalogKey` → table/default. Expected.
-- **Honest capabilities:** never advertise `toolCalling`/`imageInput` without the real passthrough — VS
-  Code hides non-tool models from agent/edit/Ctrl+I, and a declared-but-unimplemented capability breaks.
-- **Context is the TOTAL window, decomposed** input+output (VS Code sums them). Don't pass `context` as
-  input AND `output` as output — that double-counts.
-- **Pure logic stays vscode-free in `catalog.ts`** (TDD via `npm test`); `modelsDev.ts` is the only
-  network module (also vscode-free). Don't fold testable logic into `extension.ts`/`chatProvider.ts`.
-- `engines.vscode` is now **^1.104** (the LM Chat Provider API is finalized there).
+**Next task: SHIP the branch — `feat/codex-tracer` (#13+#14+#15) → PR / merge to `main`.** Enter with
+**`/preset ship`**. There is no remaining slice in PRD #11; if instead starting new work, `/preset init`.
 
-Full rolling state in [[active-work]]; settled choices in [[decisions]]; domain language in `CONTEXT.md`.
+**Landmines / things to know:**
+- **#15 is uncommitted-then-committed this session** — if the commit didn't land, the working tree holds the
+  #15 diff (`catalog.ts`, `chatProvider.ts`, `codexClient.ts`, `codex.test.ts`). Verify with `git log`.
+- **Replayed `function_call` items use `call_id` only (no `id`)** — F5-proven sufficient. If a future
+  multi-turn agent round-trip 400s, add a derived `id` (`fc_…`) to the item in `buildCodexResponsesBody`
+  (one line + one test). See [[gotchas]] "Codex tools must be STRICT…".
+- **Codex tools must be STRICT** (every object closed + all keys required) — `enforceStrictResponsesSchema`
+  does this; don't loosen it (Codex 400s open objects). The tool shape is **flat**, not chat-completions'
+  nested `function` — don't reuse `toOpenAiTools` for Codex.
+- Reference for the Responses tool shapes: `XETH--7` `src/services/api/codexShim.ts`
+  (`D:\Mods\xethryon\new agent\XETH--7`).
+
+Full state in [[active-work]]; settled choices in [[decisions]]; traps in [[gotchas]]; domain language in `CONTEXT.md`.

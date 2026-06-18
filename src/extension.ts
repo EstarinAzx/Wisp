@@ -20,10 +20,13 @@ import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvider';
 import {
-  Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, planLegacyMigration,
-  buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
+  Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, resolveKeyId, planLegacyMigration, planZenToGoMigration,
+  buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines, isCodexProvider, isCodexSignedIn, CODEX_MODELS,
+  type CodexCreds,
 } from './catalog';
 import { registerWispChatProvider } from './chatProvider';
+import { CodexAuth } from './codexAuth';
+import { codexInquire } from './codexClient';
 
 // ----------------------------- Constants ----------------------------- //
 
@@ -37,7 +40,7 @@ const SECRET_KEY = 'wisp.apiKey';
 // A Provider is one OpenAI-chat-compatible backend, reached by swapping {baseUrl, key, model} on the
 // same `openai` SDK. Base URLs are HARDCODED here, never read from settings: choosing a Provider
 // chooses where the bearer key is sent, so a workspace-overridable URL would be a key-redirect vector.
-// The catalog is the nine built-ins below (OpenCode Zen default) plus a user-defined Custom row whose
+// The catalog is the ten built-ins below (OpenCode Go default) plus a user-defined Custom row whose
 // base URL alone comes from settings (machine-scoped wisp.baseUrl). No model-id transform — each
 // defaultModel is in the Provider's native form (re-adding Zen's `opencode/` prefix 401s the /go
 // endpoint, which wants the bare id /models serves). GitHub Copilot and Cursor are deliberately
@@ -50,7 +53,21 @@ const SECRET_KEY = 'wisp.apiKey';
 // row's catalogKey). Fallback when a model isn't in models.dev or the fetch fails: context = a neutral
 // default (no guess table); vision = the conservative modelSupportsVision id heuristic.
 const PROVIDERS: Provider[] = [
-  { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/go/v1', defaultModel: 'minimax-m3', apiKeyEnv: 'OPENCODE_API_KEY', catalogKey: 'opencode-go' },
+  { id: 'opencode-go', label: 'OpenCode Go', baseUrl: 'https://opencode.ai/zen/go/v1', defaultModel: 'minimax-m3', apiKeyEnv: 'OPENCODE_API_KEY', catalogKey: 'opencode-go' },
+  // OpenCode Zen = the premium /zen/v1 catalog (Claude/GPT/Gemini), distinct from Go's budget /zen/go/v1.
+  // Shares the OPENCODE_API_KEY env fallback. Model ids are BARE (verified via GET /zen/v1/models,
+  // 2026-06-18) — no `opencode/` prefix. defaultModel is ⚠ best-effort: claude-haiku-4-5 is the cheapest
+  // verified-present model; the panel's model picker is the correction path. catalogKey 'opencode' for
+  // models.dev context/vision (absent there -> neutral default + the modelSupportsVision id heuristic).
+  // keyId 'opencode-go': same OpenCode account as Go (one key, two endpoints), so it borrows Go's stored
+  // key instead of demanding a second entry — otherwise it stays hidden from the picker until re-keyed.
+  { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/v1', defaultModel: 'claude-haiku-4-5', apiKeyEnv: 'OPENCODE_API_KEY', catalogKey: 'opencode', keyId: 'opencode-go' },
+  // Codex = the subscription-backed ChatGPT Codex backend (Responses API, reached by OAuth, not an API
+  // key). kind:'codex' switches the Inquire/usability paths off the OpenAI-chat code. No apiKeyEnv — it
+  // is "usable when signed in". Base URL is the Codex backend; defaultModel is the Codex-tuned default.
+  // No catalogKey (not in models.dev) and it is intentionally absent from the native chat picker until
+  // the Responses tool-mapper lands (#15) — keyless rows are hidden there, which is correct for now.
+  { id: 'codex', label: 'Codex', baseUrl: 'https://chatgpt.com/backend-api/codex', defaultModel: 'gpt-5.3-codex', apiKeyEnv: '', kind: 'codex' },
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY', catalogKey: 'openai' },
   { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', apiKeyEnv: 'GROQ_API_KEY', catalogKey: 'groq' },
   { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', defaultModel: 'codestral-latest', apiKeyEnv: 'MISTRAL_API_KEY', catalogKey: 'mistral' },
@@ -85,6 +102,10 @@ let lastError = false;
 // Side panel handle so key/config changes can push fresh state into the webview.
 let panel: WispPanelProvider | undefined;
 
+// Codex OAuth/token lifecycle (sign-in, store, import, refresh). Set in activate once SecretStorage
+// exists; the Inquire codex branch + the sign-in/out commands + the panel state all go through it.
+let codexAuth: CodexAuth;
+
 // B2 inline-diff state. While a preview is on screen the buffer holds old+new lines together
 // (decorated), and exactly one preview is live at a time. `range` covers the rendered preview text;
 // Accept replaces it with `acceptText` (kept+added), Reject restores `originalText` (the span).
@@ -108,6 +129,11 @@ const activeProvider = (): Provider =>
 // pre-catalog legacy slot, migrated once on activate).
 const keySlot = (id: string): string => `${SECRET_KEY}.${id}`;
 
+// The slot a Provider's key lives in — its own, unless it borrows a sibling's via keyId (OpenCode Zen
+// reads/writes Go's slot). All key get/store/delete/display routes through this so a shared credential
+// stays single-sourced.
+const keySlotFor = (p: Provider): string => keySlot(resolveKeyId(p));
+
 // Active model: the Provider's remembered model (globalState) else its native default. Each Provider
 // keeps its own model — one global id is wrong across Providers (Zen minimax-m3 vs Groq llama-…).
 const activeModel = (): string =>
@@ -117,11 +143,12 @@ const activeModel = (): string =>
 // user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
 const activeBaseUrl = (): string => resolveBaseUrl(activeProvider(), cfg().get<string>('baseUrl') ?? '');
 
-// Key resolution for a given Provider: its namespaced SecretStorage slot first, then the row's own env
-// var (OPENCODE_API_KEY for Zen, GROQ_API_KEY for Groq, …). Never read from plaintext settings. Takes
-// the Provider explicitly so the chat surface can resolve any catalog row, not only the Active one.
+// Key resolution for a given Provider: its (possibly borrowed, via keyId) SecretStorage slot first,
+// then the row's own env var (OPENCODE_API_KEY for OpenCode, GROQ_API_KEY for Groq, …). Never read from
+// plaintext settings. Takes the Provider explicitly so the chat surface can resolve any catalog row, not
+// only the Active one.
 const keyForProvider = async (p: Provider): Promise<string> => {
-  const stored = await secrets.get(keySlot(p.id));
+  const stored = await secrets.get(keySlotFor(p));
   return stored?.trim() || (p.apiKeyEnv ? process.env[p.apiKeyEnv] : '') || '';
 };
 
@@ -182,12 +209,12 @@ const exitInFlight = () => { inFlight = Math.max(0, inFlight - 1); renderStatus(
 // Panel sync after key changes happens via the secrets.onDidChange listener in activate() —
 // it fires for our own store/delete too, and for changes made from other VS Code windows.
 const storeApiKey = async (value: string): Promise<void> => {
-  await secrets.store(keySlot(activeProvider().id), value.trim());
+  await secrets.store(keySlotFor(activeProvider()), value.trim());
   cachedClient = undefined;
 };
 
 const clearApiKey = async (): Promise<void> => {
-  await secrets.delete(keySlot(activeProvider().id));
+  await secrets.delete(keySlotFor(activeProvider()));
   cachedClient = undefined;
 };
 
@@ -243,8 +270,10 @@ const setBaseUrl = async (url: string): Promise<void> => {
 // keySource keeps the UI honest when the key comes from the env var (Clear can't remove that).
 const getState = async (): Promise<PanelState> => {
   const p = activeProvider();
-  const stored = (await secrets.get(keySlot(p.id)))?.trim();
+  const stored = (await secrets.get(keySlotFor(p)))?.trim();
   const keySource = stored ? 'stored' : p.apiKeyEnv && process.env[p.apiKeyEnv] ? 'env' : 'none';
+  // Codex has no API key — its panel shows sign-in state instead of the key field.
+  const signedIn = isCodexProvider(p) ? await codexAuth.isSignedIn() : false;
   return {
     keyIsSet: keySource !== 'none',
     keySource,
@@ -254,28 +283,57 @@ const getState = async (): Promise<PanelState> => {
     providerId: p.id,
     providers: PROVIDERS.map((r) => ({ id: r.id, label: r.label })), // drives the panel dropdown
     isCustom: p.id === CUSTOM_ID,
+    kind: p.kind ?? 'openai-chat',
+    signedIn,
+    // Codex has no /models route — offer the curated list instead of a live fetch.
+    modelOptions: isCodexProvider(p) ? CODEX_MODELS : undefined,
   };
 };
 
 // ----------------------------- Migration ----------------------------- //
 
 // One-time, silent: the pre-catalog key lived in the bare `wisp.apiKey` slot with the model in
-// `wisp.model`. Zen was the only Provider that existed then, so that key is provably the Zen key.
-// planLegacyMigration() owns the idempotency + correctness logic (no-op once the Zen slot exists, so
-// it runs at most once and can never lose a key); here we read the storage state and apply its plan.
+// `wisp.model`. The /zen/go/v1 endpoint was the only Provider that existed then, so that key is provably
+// a GO key — migrate it to the go slot (not zen). planLegacyMigration() owns the idempotency +
+// correctness logic (no-op once the go slot exists, so it runs at most once and can never lose a key);
+// here we read the storage state and apply its plan.
 const migrateLegacyKey = async (): Promise<void> => {
-  const zenSlot = keySlot('opencode-zen');
+  const goSlot = keySlot('opencode-go');
   const plan = planLegacyMigration({
-    zenKeyPresent: !!(await secrets.get(zenSlot)),
+    goKeyPresent: !!(await secrets.get(goSlot)),
     legacyKey: await secrets.get(SECRET_KEY),
     legacyModel: cfg().get<string>('model'),
   });
   if (!plan) return;
-  await secrets.store(zenSlot, plan.storeZenKey);
+  await secrets.store(goSlot, plan.storeGoKey);
   if (plan.setModel) {
-    await globalState.update(MODEL_MAP_KEY, { ...(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}), 'opencode-zen': plan.setModel });
+    await globalState.update(MODEL_MAP_KEY, { ...(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}), 'opencode-go': plan.setModel });
   }
   await secrets.delete(SECRET_KEY);
+};
+
+// One-time, silent: the renamed `opencode-go` row used to be the misnamed `opencode-zen` row (it always
+// pointed at /zen/go/v1), so any key in the old `opencode-zen` slot is provably a GO key. Move it — key
+// and remembered model — to the go slot, then DELETE the zen slot + its stale Go model, else the
+// genuinely-new `opencode-zen` row (/zen/v1) would inherit a Go key/model and 401. planZenToGoMigration()
+// owns idempotency (no-op once the go slot exists). Runs BEFORE migrateLegacyKey so the rare
+// both-slots-present case frees the zen slot rather than orphaning a Go key in it.
+const migrateZenToGo = async (): Promise<void> => {
+  const goSlot = keySlot('opencode-go');
+  const zenSlot = keySlot('opencode-zen');
+  const models = globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {};
+  const plan = planZenToGoMigration({
+    goKeyPresent: !!(await secrets.get(goSlot)),
+    zenSlotKey: await secrets.get(zenSlot),
+    zenSlotModel: models['opencode-zen'],
+  });
+  if (!plan) return;
+  await secrets.store(goSlot, plan.storeGoKey);
+  const nextModels = { ...models };
+  delete nextModels['opencode-zen']; // the old zen-slot model was a Go model — don't leak it to new Zen
+  if (plan.setModel) nextModels['opencode-go'] = plan.setModel;
+  await globalState.update(MODEL_MAP_KEY, nextModels);
+  await secrets.delete(zenSlot); // free the slot for the genuinely-new /zen/v1 provider
 };
 
 // ----------------------------- Inline diff (B2) ----------------------------- //
@@ -388,6 +446,26 @@ const setApiKey = async (): Promise<void> => {
   vscode.window.showInformationMessage('Wisp: API key saved.');
 };
 
+// Codex sign-in: run the browser OAuth flow, store the tokens, refresh the panel. Failure (cancelled /
+// port busy / network) is surfaced; a successful sign-in flips the Codex row to "usable".
+const codexSignIn = async (): Promise<void> => {
+  try {
+    await codexAuth.signIn();
+    vscode.window.showInformationMessage('Wisp: signed in to Codex.');
+    void panel?.postState();
+  } catch (err) {
+    output.appendLine(`[error] codex sign-in ${String(err)}`);
+    vscode.window.showErrorMessage(`Wisp: Codex sign-in failed — ${String(err)}`);
+  }
+};
+
+// Codex sign-out: clear the stored token bundle and refresh the panel.
+const codexSignOut = async (): Promise<void> => {
+  await codexAuth.signOut();
+  vscode.window.showInformationMessage('Wisp: signed out of Codex.');
+  void panel?.postState();
+};
+
 // List served models in a quick-pick and write the choice into the setting.
 const listModels = async (): Promise<void> => {
   if (!(await resolveApiKey())) {
@@ -429,12 +507,22 @@ const inquire = async (): Promise<void> => {
     return;
   }
 
-  if (!(await resolveApiKey())) {
+  // Two usability rules: Codex is usable when SIGNED IN (no API key); every other Provider when keyed.
+  const provider = activeProvider();
+  const codex = isCodexProvider(provider);
+  let creds: CodexCreds | undefined;
+  if (codex) {
+    creds = await codexAuth.current();
+    if (!isCodexSignedIn(creds)) {
+      vscode.window.showWarningMessage("Sign in to Codex first (command: 'Wisp: Sign in to Codex').");
+      return;
+    }
+  } else if (!(await resolveApiKey())) {
     vscode.window.showWarningMessage("Set your API key first (command: 'Wisp: Set API Key').");
     return;
   }
-  const client = await getClient();
-  if (!client) return;
+  const client = codex ? undefined : await getClient();
+  if (!codex && !client) return;
 
   const model = activeModel();
   const original = document.getText();
@@ -450,17 +538,22 @@ const inquire = async (): Promise<void> => {
       { location: vscode.ProgressLocation.Notification, title: 'Wisp: editing…', cancellable: true },
       async (_progress, token) => {
         token.onCancellationRequested(() => controller.abort());
-        const maxTokens = cfg().get<number>('maxTokens') ?? 0;
-        const res = await client.chat.completions.create(
-          {
-            model,
-            messages,
-            ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
-            temperature: cfg().get<number>('temperature') ?? 0.1,
-          },
-          { signal: controller.signal },
-        );
-        reply = res.choices[0]?.message?.content ?? '';
+        // Codex speaks the Responses API (its own client); every other Provider uses the OpenAI SDK.
+        if (codex) {
+          reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, signal: controller.signal });
+        } else {
+          const maxTokens = cfg().get<number>('maxTokens') ?? 0;
+          const res = await client!.chat.completions.create(
+            {
+              model,
+              messages,
+              ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
+              temperature: cfg().get<number>('temperature') ?? 0.1,
+            },
+            { signal: controller.signal },
+          );
+          reply = res.choices[0]?.message?.content ?? '';
+        }
       },
     );
     lastError = false;
@@ -520,7 +613,12 @@ export const activate = (context: vscode.ExtensionContext): void => {
   output = vscode.window.createOutputChannel('Wisp');
   secrets = context.secrets;
   globalState = context.globalState;
-  void migrateLegacyKey(); // silent one-time wisp.apiKey → wisp.apiKey.opencode-zen
+  // Codex token lifecycle — browser open goes through vscode.env.openExternal; logs to the Wisp channel.
+  codexAuth = new CodexAuth(context.secrets, (url) => vscode.env.openExternal(vscode.Uri.parse(url)), (m) => output.appendLine(m));
+  // Silent one-time migrations, ordered: Zen→Go slot move (frees the zen slot for the new /zen/v1
+  // provider) BEFORE the pre-catalog wisp.apiKey→go shim, so the rare both-present case can't orphan a
+  // Go key in the zen slot. Both are idempotent on the go slot, so the pair is a no-op after the first.
+  void (async () => { await migrateZenToGo(); await migrateLegacyKey(); })();
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.show();
@@ -544,6 +642,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
     setModel,
     setProvider,
     setBaseUrl,
+    codexSignIn,
+    codexSignOut,
   });
 
   context.subscriptions.push(
@@ -553,6 +653,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
     vscode.commands.registerCommand('wisp.setApiKey', setApiKey),
     vscode.commands.registerCommand('wisp.listModels', listModels),
     vscode.commands.registerCommand('wisp.inquire', inquire),
+    vscode.commands.registerCommand('wisp.codexSignIn', codexSignIn),
+    vscode.commands.registerCommand('wisp.codexSignOut', codexSignOut),
     // Internal — invoked by the inline-diff CodeLenses, not contributed to the palette.
     vscode.commands.registerCommand('wisp.acceptEdit', () => resolvePreview(true)),
     vscode.commands.registerCommand('wisp.rejectEdit', () => resolvePreview(false)),
@@ -568,6 +670,10 @@ export const activate = (context: vscode.ExtensionContext): void => {
       customBaseUrl: () => cfg().get<string>('baseUrl') ?? '',
       keyFor: keyForProvider,
       clientFor: clientForProvider,
+      // Codex usability + creds for the chat surface: signed-in flag gates the row, current() returns the
+      // refreshed OAuth bundle for the streaming Responses call.
+      codexSignedIn: () => codexAuth.isSignedIn(),
+      codexCreds: () => codexAuth.current(),
       log: (m) => output.appendLine(m),
     }),
     // Keep derived state in sync when settings change out from under us.

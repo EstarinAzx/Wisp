@@ -1,61 +1,77 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-18
+updated: 2026-06-19
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-18 by Opus 4.8._
-_Released **v1.0.0**. Branch `feat/lm-chat-provider` (slice #7 + dynamic capabilities) → PR → merged to `main`._
+_Last updated: 2026-06-19 by Opus 4.8._
+_At commit: about to commit slice #15 (branch `feat/codex-tracer`); #12–#14 committed (HEAD `774354b`)._
 
 ## Current focus
-**Slice #7 (LM Chat Provider) shipped, plus everything the user asked on top of it, then released v1.0.0.**
-Wisp's keyed Providers now appear as models in VS Code's **native** chat / Ctrl+I, with tool calling,
-vision, and **real per-model context/vision read live from models.dev**.
+**Codex Provider + OpenCode Zen/Go split batch is COMPLETE** — PRD **#11**, slices **#12–#15** all done.
+Codex now has **full parity** across both surfaces: Inquire edits AND VS Code's native chat / agent /
+Ctrl+I — text streaming, real context windows, vision, **and tool calling** (agent-mode round-trip).
+Branch `feat/codex-tracer` holds #13/#14 (committed) + #15 (about to commit) and is ready to ship.
 
 ## State
-- **In flight:** nothing (v1.0.0 cut).
-- **Done this session (branch `feat/lm-chat-provider`, 7 feature commits + release):**
-  1. `src/chatProvider.ts` — registers the `wisp` Language Model Chat Provider; streams via Wisp's own
-     OpenAI client. Pure `buildChatModelInfos` in `catalog.ts`.
-  2. **Tool calling** — forward `options.tools`, reassemble streamed `delta.tool_calls` → tool-call parts.
-  3. **Vision** — forward image parts as `image_url` data URIs.
-  4–5. Context + vision derived from the **active model** (heuristic `CONTEXT_TABLE`/`VISION_FAMILIES`).
-  6. **Live models.dev** (`src/modelsDev.ts`) — real `limit.context`/`output`/`modalities` per model,
-     keyed by per-row `catalogKey`; heuristics demoted to fallback. (See [[decisions]] 2026-06-18.)
-  7. **Context decomposition** — split the window into input+output so VS Code's summed "Context Size"
-     column shows the real number (kimi 256K not 524K).
-  - **Release:** version → **1.0.0**, new `CHANGELOG.md`, GitHub release `v1.0.0` + `wisp-1.0.0.vsix`.
-- **Verification:** `npm test` **70/70**; `npm run compile` clean; live e2e against models.dev confirmed
-  (kimi 256K, gpt-4o-mini 128K, minimax-m3 512K + vision). Native-chat F5 done by the user earlier
-  (models appeared + selectable after tool-calling landed).
+- **Done this session — slice #15 (Codex tool-calling parity, agent mode):** the codex chat branch now
+  forwards agent tools and round-trips tool calls/results — the `toolCalling: true` flag (flipped in #14
+  for picker visibility) is now **honest**.
+  - **Tool converter:** new pure `toCodexResponsesTools` (`catalog.ts`) — VS Code tool defs → **flat**
+    Responses function tools (`{type,name,description,parameters,strict:true}`, NOT chat-completions'
+    nested `function` object). A self-contained recursive `enforceStrictResponsesSchema` makes every
+    object closed (`additionalProperties:false`) with **all** keys `required` — Codex strict mode demands it.
+  - **Tool-call reducer:** new pure `reduceResponsesToolCalls` (`catalog.ts`) — Responses analogue of
+    `assembleToolCalls`. Accumulates `response.output_item.added` (function_call id/call_id/name) +
+    `response.function_call_arguments.delta` (arg fragments) keyed by **item id**, surfaces **call_id** as
+    the round-trip id. Returns `AssembledToolCall[]`.
+  - **Round-trip serialization:** `buildCodexResponsesBody` extended — assistant tool calls →
+    `function_call` input items, tool results → `function_call_output` items, ordered per API
+    (function_call_output before the next user message). Body gains `tools`/`tool_choice`/
+    `parallel_tool_calls` only when tools are non-empty.
+  - **Stream widening:** `codexStream` (`codexClient.ts`) yield type `string` → **`CodexStreamEvent`**
+    union (`{type:'text'} | {type:'toolCall'}`); collects function-call events, folds them via the reducer
+    at stream end. `chatProvider` codex branch threads `options.tools`/`toolMode` in and emits
+    `LanguageModelTextPart` / `LanguageModelToolCallPart`. `toCodexMessages` now carries
+    `toolCalls`/`toolResults` (drop-filter removed so tool-only turns survive).
+  - **Verified:** `npm test` **137/137**, `npm run compile` clean (tsc host+webview + Vite). **F5 PASSED**
+    — agent mode, Codex (gpt-5.5) fired **5 parallel `Read` tool calls**, results fed back, summary
+    reflected actual file contents. Full model→tool→result→continue loop confirmed.
+- **In flight:** nothing — #15 finished, about to commit.
+- **Planned next:** **ship the branch** — `feat/codex-tracer` (#13+#14+#15) → PR / merge to `main`
+  (`/preset ship`). The Codex/Zen-Go batch is feature-complete; no slice left in PRD #11.
 - **Blocked:** nothing.
 
 ## Pick up here
-The #3 pivot epic is **complete** (slices #4–#8 + the #7 bonus all shipped). Next session is open:
-- **Optional cleanup (offered, not yet done):** strip `CONTEXT_TABLE` + `VISION_FAMILIES` so the only
-  fallback is a neutral default (no per-model *guesses*) — the user leaned toward keeping them as offline
-  fallback. Decide if/when.
-- **Carried backlog:** verify the 3 still-⚠ `defaultModel`s once keys exist (`ollama` `qwen2.5-coder`,
-  `kilocode`/`cline` `anthropic/claude-3.5-sonnet` — the latter two are stale ids absent from models.dev,
-  so they fall back today). README pass for `wisp.provider` / catalog / native-chat usage.
+The **#11 batch is done**. Next action is **shipping `feat/codex-tracer`** (open the PR / merge — run
+`/preset ship`), not more feature code. If instead starting a NEW line of work, there is no pending slice —
+pick a new PRD/idea (`/preset init`) or address an open question below.
 
 ## Skills for next session
-- `superpowers:test-driven-development` — TDD any new pure logic into `src/catalog.ts` (`npm test`).
-- `superpowers:brainstorming` — for any new feature the user brings.
+- `/preset ship` — push `feat/codex-tracer` and open the PR composed from the diff.
+- `/preset init` — only if starting a brand-new feature (no slice is pending).
 
 ## Open questions
-- Strip the heuristic guess-tables, or keep as offline fallback? (user-led)
-- The 3 ⚠ model ids stay unverified until keys exist (non-blocking; models.dev covers the rest).
+- **Codex `id` field on replayed `function_call` items:** Wisp sends **`call_id` only** (the documented
+  stateless Responses contract); XETH-7 also sends a derived `id` (`fc_…`). The #15 F5 round-trip
+  **succeeded with call_id-only**, so the extra `id` is unnecessary here — but if a future multi-turn agent
+  flow 400s on the round-trip, adding `id` to the `function_call` item in `buildCodexResponsesBody` is the
+  fix (one line + one test). See [[gotchas]].
+- Codex `reasoning` effort is a fixed `medium` for gpt-5/o models. Make it per-model only if one needs
+  `high` / rejects `medium`. Not yet observed.
+- `codexModelCaps` vision is blanket-`true` for all codex ids. Gate per-model only if a specific `*-codex`
+  id 400s on an image. Not yet observed.
 
 ## Recent context
-- **models.dev is the capability source** — keyed by base-URL match, NOT provider name (`.../zen/go/v1`
-  → `opencode-go`, `kilocode` → `kilo`). Local Ollama / Cline / Custom are absent → table/default. See
-  [[decisions]] + [[gotchas]].
-- Pattern intact: pure, unit-tested logic lives vscode-free in `catalog.ts`; `extension.ts` / `chatProvider.ts`
-  do the vscode/network glue. `modelsDev.ts` is the only network module (vscode-free).
+- **#15 F5 (this session):** "read the files in this directory" → Codex emitted 5 `Read` tool calls in one
+  turn (parallel), VS Code ran them, results round-tripped, the model summarized the real contents. This
+  both proves the agent loop and resolves the call_id-only question above (no 400).
+- **The honesty arc across #14→#15:** #14 advertised `toolCalling:true` for *picker visibility* while
+  tools were ignored (answered as text) — a bounded honesty gap. #15 forwards the tools, closing it; the
+  flag is now fully honest.
 
 ## Related
 - [[overview]]

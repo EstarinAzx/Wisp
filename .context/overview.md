@@ -1,17 +1,17 @@
 ---
 type: overview
 project: wisp
-updated: 2026-06-17
+updated: 2026-06-19
 tags: [context, overview]
 ---
 
 # Overview
 
 **Project:** wisp
-**One-liner:** **Wisp** — a VS Code extension that performs AI inline code **edits** (**Inquire**: type an instruction → the model returns SEARCH/REPLACE edit blocks over whole-file context, applied and reviewed as an in-editor accept/reject diff) routed through a **Provider catalog** of OpenAI-compatible backends — **9 built-ins** (OpenCode Zen default · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom** — with a Preact + Tailwind v4 side panel for switching the **Active Provider** and managing its per-Provider API key and model. **Wisp** is the product; each backend is a **Provider** (OpenCode Zen is the default, first one). _Ghost-text Completion was removed in slice #5 (2026-06-17); Wisp is Inquire-only._
+**One-liner:** **Wisp** — a VS Code extension that performs AI inline code **edits** (**Inquire**: type an instruction → the model returns SEARCH/REPLACE edit blocks over whole-file context, applied and reviewed as an in-editor accept/reject diff) routed through a **Provider catalog** of backends — **11 built-ins** (OpenCode Go default · OpenCode Zen · **Codex** · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom** — with a Preact + Tailwind v4 side panel for switching the **Active Provider** and managing its per-Provider credential and model. **Wisp** is the product; each backend is a **Provider**. Providers come in two **kinds**: API-key (OpenAI-compatible chat, the default OpenCode Go and the rest) and **Codex** (`kind:'codex'`, reached by ChatGPT-account OAuth sign-in, running Codex models on the user's subscription via the Responses API). OpenCode Go is the default; it and OpenCode Zen share one OpenCode key. _Ghost-text Completion was removed in slice #5 (2026-06-17); Wisp is Inquire-only._
 
 ## Layout
-- `src/` — extension-host (Node) TypeScript. `extension.ts` (the Inquire command, commands, shared actions, status bar) + `sidePanelProvider.ts` (the WebviewView) + `catalog.ts` (vscode-free pure Provider-catalog data + resolvers + Inquire edit-prompt/reply helpers; the only unit-tested module, `catalog.test.ts`).
+- `src/` — extension-host (Node) TypeScript. `extension.ts` (the Inquire command, commands, shared actions, status bar) + `sidePanelProvider.ts` (the WebviewView) + `chatProvider.ts` (the native LM chat-provider glue) + `catalog.ts` (vscode-free pure Provider-catalog data + resolvers + Inquire/Codex helpers; unit-tested by `catalog.test.ts` + `codex.test.ts`). Codex impurities are isolated: `codexAuth.ts` (OAuth/PKCE/loopback/SecretStorage/refresh) + `codexClient.ts` (Responses fetch + SSE→text).
 - `webview/` — Preact + Tailwind v4 side-panel UI (own tsconfig), bundled separately by Vite.
 - `media/` — activity-bar icon SVG.
 - `.vscode/` — `launch.json` (F5 → Extension Development Host) + `tasks.json` (build).
