@@ -3,8 +3,7 @@
   "displayName": "Wisp",
   "description": "BYOK model router for VS Code's Copilot chat, agent, and Ctrl+I — bring your own API keys or ChatGPT (Codex) subscription. Plus Inquire inline edits.",
   "version": "1.1.0",
-  "publisher": "local",
-  "private": true,
+  "publisher": "EsarinAzx",
   "repository": {
     "type": "git",
     "url": "https://github.com/EstarinAzx/Wisp.git"
