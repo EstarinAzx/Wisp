@@ -133,9 +133,9 @@ VS Code shows ONLY tool-capable models in the chat / Ctrl+I / agent picker. A mo
 `toolCalling: false` is absent **everywhere** the picker appears — Ask mode included; it shows up **only** in
 the Manage Models list (which lists every registered model, regardless of capability). Docs: "if the model
 doesn't support tool calling, it won't be shown in the model picker" (confirmed by #14 F5). Consequence:
-**Codex advertises `toolCalling: true` even though tools aren't forwarded until #15** — visibility requires
-it. `buildChatModelInfos` sets `toolCalling: true` for every row. Don't set it false for a model you still
-want selectable. (`imageInput`/vision is NOT filtered on — only `toolCalling`.)
+**Codex advertises `toolCalling: true` so it is selectable**, and as of #15 the flag is **honest** (tools are
+forwarded + round-tripped). `buildChatModelInfos` sets `toolCalling: true` for every row. Don't set it false
+for a model you still want selectable. (`imageInput`/vision is NOT filtered on — only `toolCalling`.)
 
 ### Codex `/responses` requires a non-empty `instructions` — default it for native chat
 The backend **400s "Instructions are required"** if `instructions` is absent or empty. Inquire never hit this
@@ -159,6 +159,20 @@ resolver routes codex rows to it. **Vision is real**: gpt-5/o are multimodal and
 conservative `modalities: ['text']` registry flag, which understates it. This is the one place a small
 codex-only caps table is intentional (see [[decisions]] 2026-06-19); don't fold codex back to the neutral
 default.
+
+### Codex tools must be STRICT, and a replayed `function_call` needs only `call_id` (not `id`)
+Two facts for the #15 agent round-trip. **(1) Strict schemas:** `toCodexResponsesTools` runs every tool's
+`inputSchema` through `enforceStrictResponsesSchema` — every object gets `additionalProperties:false` and
+**all** its keys listed in `required` (recursively, incl. array `items` and `anyOf/oneOf/allOf`), and the
+tool carries `strict:true`. Codex strict mode **rejects** an open or partially-required object. The tool is
+**flat** (`{type,name,description,parameters,strict}`), NOT chat-completions' nested `function` object —
+don't reuse `toOpenAiTools` for Codex. **(2) call_id-only round-trip:** the replayed `function_call` input
+item carries **`call_id`, name, arguments** — **no `id`**. With `store:false` the request is stateless, so
+there is no prior server item for an `id` to reference; the F5 round-trip succeeded sending call_id-only.
+XETH-7 *also* sends a derived `id` (`fc_…`) — unnecessary here. If a future multi-turn flow 400s on the
+round-trip, add `id` to the `function_call` item in `buildCodexResponsesBody` (one line). The reducer
+(`reduceResponsesToolCalls`) keys streamed events by the **item id** but surfaces **call_id** as the
+round-trip id — that is what `function_call_output.call_id` must match. See [[decisions]] 2026-06-19.
 
 ## Related
 - [[api]]

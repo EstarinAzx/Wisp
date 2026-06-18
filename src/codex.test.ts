@@ -6,7 +6,8 @@ import {
   buildCodexResponsesBody, reduceResponsesTextEvents, extractResponsesText, parseSseBlock,
   decodeJwtPayload, parseChatgptAccountId, shouldRefreshCodexToken,
   parseCodexAuthJson, codexReasoning, codexModelCaps, CODEX_MODELS,
-  type Provider, type EditMessage,
+  toCodexResponsesTools, reduceResponsesToolCalls,
+  type Provider, type EditMessage, type CodexResponsesEvent,
 } from './catalog';
 
 // A JWT is header.payload.signature; only the payload (base64url JSON) is read. Build one so the
@@ -112,6 +113,171 @@ describe('buildCodexResponsesBody', () => {
   it('omits reasoning when not provided', () => {
     const body = buildCodexResponsesBody({ model: 'gpt-4.1', messages: [{ role: 'user', content: 'hi' }] });
     expect('reasoning' in body).toBe(false);
+  });
+
+  // Agent mode: the converted tools ride on the body, default tool_choice 'auto', and the Responses API's
+  // parallel_tool_calls is enabled (Codex may emit several function_call items in one turn).
+  it('forwards tools with tool_choice auto and parallel_tool_calls', () => {
+    const tools = toCodexResponsesTools([{ name: 'readFile', description: 'd', inputSchema: { type: 'object', properties: {} } }]);
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [{ role: 'user', content: 'hi' }], tools });
+    expect(body.tools).toEqual(tools);
+    expect(body.tool_choice).toBe('auto');
+    expect(body.parallel_tool_calls).toBe(true);
+  });
+
+  // VS Code's Required tool mode maps to the Responses 'required' tool_choice.
+  it('uses required tool_choice when asked', () => {
+    const tools = toCodexResponsesTools([{ name: 'x', description: 'd' }]);
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [{ role: 'user', content: 'hi' }], tools, toolChoice: 'required' });
+    expect(body.tool_choice).toBe('required');
+  });
+
+  // No tools → no tools/tool_choice/parallel keys at all (a bare tool_choice with no tools 400s).
+  it('omits tool fields when there are no tools', () => {
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [{ role: 'user', content: 'hi' }], tools: [] });
+    expect('tools' in body).toBe(false);
+    expect('tool_choice' in body).toBe(false);
+    expect('parallel_tool_calls' in body).toBe(false);
+  });
+
+  // An assistant turn that called a tool becomes a standalone function_call input item (call_id round-trips
+  // to the tool result). A tool-only turn carries no message item — only the function_call.
+  it('serializes an assistant tool-call turn to a function_call item', () => {
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'readFile', argsJson: '{"path":"a.ts"}' }] },
+    ] });
+    expect(body.input).toEqual([
+      { type: 'function_call', call_id: 'call_1', name: 'readFile', arguments: '{"path":"a.ts"}' },
+    ]);
+  });
+
+  // A tool result lives on a user turn but serializes to a standalone function_call_output item keyed by
+  // call_id. A result-only turn carries no message item.
+  it('serializes a tool-result turn to a function_call_output item', () => {
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [
+      { role: 'user', content: '', toolResults: [{ callId: 'call_1', content: 'file body' }] },
+    ] });
+    expect(body.input).toEqual([
+      { type: 'function_call_output', call_id: 'call_1', output: 'file body' },
+    ]);
+  });
+
+  // A full agent round-trip keeps Responses ordering: the assistant message + its function_call, then the
+  // function_call_output BEFORE the next user message.
+  it('preserves order across a tool round-trip', () => {
+    const body = buildCodexResponsesBody({ model: 'gpt-5.3-codex', messages: [
+      { role: 'user', content: 'read a.ts' },
+      { role: 'assistant', content: 'sure', toolCalls: [{ id: 'call_1', name: 'readFile', argsJson: '{}' }] },
+      { role: 'user', content: 'thanks', toolResults: [{ callId: 'call_1', content: 'body' }] },
+    ] });
+    expect(body.input).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'read a.ts' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'sure' }] },
+      { type: 'function_call', call_id: 'call_1', name: 'readFile', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'body' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'thanks' }] },
+    ]);
+  });
+});
+
+describe('toCodexResponsesTools', () => {
+  // VS Code tool defs → flat Responses function tools (name/description/parameters at top level, unlike
+  // chat completions' nested function object). Codex requires STRICT schemas: every object gets
+  // additionalProperties:false and ALL its property keys listed in required.
+  it('maps a tool to a strict Responses function tool', () => {
+    expect(toCodexResponsesTools([{ name: 'readFile', description: 'read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }]))
+      .toEqual([{
+        type: 'function', name: 'readFile', description: 'read a file', strict: true,
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, additionalProperties: false, required: ['path'] },
+      }]);
+  });
+
+  // A tool with no schema still maps — parameters become an empty strict object (required: []).
+  it('defaults missing inputSchema to an empty strict object', () => {
+    expect(toCodexResponsesTools([{ name: 'noArgs', description: 'd' }]))
+      .toEqual([{
+        type: 'function', name: 'noArgs', description: 'd', strict: true,
+        parameters: { type: 'object', properties: {}, additionalProperties: false, required: [] },
+      }]);
+  });
+
+  // Strict enforcement recurses: a nested object property gets its own additionalProperties:false + required.
+  it('enforces strict mode on nested object properties', () => {
+    const [tool] = toCodexResponsesTools([{ name: 't', description: 'd', inputSchema: {
+      type: 'object', properties: { opts: { type: 'object', properties: { deep: { type: 'string' } } } },
+    } }]);
+    expect(tool.parameters).toEqual({
+      type: 'object', additionalProperties: false, required: ['opts'],
+      properties: { opts: { type: 'object', additionalProperties: false, required: ['deep'], properties: { deep: { type: 'string' } } } },
+    });
+  });
+
+  // Strict enforcement recurses into array item schemas too.
+  it('enforces strict mode on array item schemas', () => {
+    const [tool] = toCodexResponsesTools([{ name: 't', description: 'd', inputSchema: {
+      type: 'object', properties: { list: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' } } } } },
+    } }]);
+    expect(tool.parameters).toEqual({
+      type: 'object', additionalProperties: false, required: ['list'],
+      properties: { list: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['x'], properties: { x: { type: 'number' } } } } },
+    });
+  });
+});
+
+describe('reduceResponsesToolCalls', () => {
+  // The Responses streaming shape: a function_call is announced by response.output_item.added (id/call_id/
+  // name) and its arguments arrive as response.function_call_arguments.delta fragments keyed by item_id.
+  it('reassembles a function call from output_item.added + argument deltas', () => {
+    const events: CodexResponsesEvent[] = [
+      { event: 'response.output_item.added', data: { item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'readFile' } } },
+      { event: 'response.function_call_arguments.delta', data: { item_id: 'fc_1', delta: '{"pa' } },
+      { event: 'response.function_call_arguments.delta', data: { item_id: 'fc_1', delta: 'th":"a.ts"}' } },
+    ];
+    expect(reduceResponsesToolCalls(events)).toEqual([{ id: 'call_1', name: 'readFile', argsJson: '{"path":"a.ts"}' }]);
+  });
+
+  // The output_item.added can carry an initial arguments fragment that precedes the deltas.
+  it('includes the initial item.arguments before the deltas', () => {
+    const events: CodexResponsesEvent[] = [
+      { event: 'response.output_item.added', data: { item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'x', arguments: '{"a":' } } },
+      { event: 'response.function_call_arguments.delta', data: { item_id: 'fc_1', delta: '1}' } },
+    ];
+    expect(reduceResponsesToolCalls(events)).toEqual([{ id: 'call_1', name: 'x', argsJson: '{"a":1}' }]);
+  });
+
+  // Parallel function calls are distinguished by their item id; returned in first-seen order.
+  it('keeps parallel calls separate by item id', () => {
+    const events: CodexResponsesEvent[] = [
+      { event: 'response.output_item.added', data: { item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'a' } } },
+      { event: 'response.output_item.added', data: { item: { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'b' } } },
+      { event: 'response.function_call_arguments.delta', data: { item_id: 'fc_2', delta: '{"y":2}' } },
+      { event: 'response.function_call_arguments.delta', data: { item_id: 'fc_1', delta: '{"x":1}' } },
+    ];
+    expect(reduceResponsesToolCalls(events)).toEqual([
+      { id: 'call_1', name: 'a', argsJson: '{"x":1}' },
+      { id: 'call_2', name: 'b', argsJson: '{"y":2}' },
+    ]);
+  });
+
+  // The round-trip id is the call_id; fall back to the item id when a call_id is absent.
+  it('falls back to the item id when call_id is absent', () => {
+    const events: CodexResponsesEvent[] = [
+      { event: 'response.output_item.added', data: { item: { type: 'function_call', id: 'fc_9', name: 'y', arguments: '{}' } } },
+    ];
+    expect(reduceResponsesToolCalls(events)).toEqual([{ id: 'fc_9', name: 'y', argsJson: '{}' }]);
+  });
+
+  // Non-function output items (a message item) and text deltas are not tool calls — ignored.
+  it('ignores non-function output items and text events', () => {
+    const events: CodexResponsesEvent[] = [
+      { event: 'response.output_item.added', data: { item: { type: 'message' } } },
+      { event: 'response.output_text.delta', data: { delta: 'hi' } },
+    ];
+    expect(reduceResponsesToolCalls(events)).toEqual([]);
+  });
+
+  it('returns [] for no events', () => {
+    expect(reduceResponsesToolCalls([])).toEqual([]);
   });
 });
 

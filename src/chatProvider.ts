@@ -27,7 +27,7 @@ import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import {
   Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
-  buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, isCodexProvider, codexModelCaps,
+  buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, toCodexResponsesTools, isCodexProvider, codexModelCaps,
   type NormalizedTurn, type ToolCallDelta, type CodexCreds,
 } from './catalog';
 import { codexStream } from './codexClient';
@@ -78,13 +78,13 @@ const normalizeTurn = (m: vscode.LanguageModelChatRequestMessage): NormalizedTur
 const toOpenAiMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
   buildOpenAiChatMessages(messages.map(normalizeTurn));
 
-// Native chat turns → Codex Responses messages: role, text, and any attached images (forwarded as
-// input_image). Tool calls aren't forwarded yet (wired in Slice 4). A turn with neither text nor an image
-// (e.g. a bare tool-result) is dropped.
+// Native chat turns → Codex Responses messages: role, text, any attached images (forwarded as input_image),
+// and the agent round-trip — the tool calls a turn made and the tool results it carries. Empty turns are
+// kept as-is; buildCodexResponsesBody emits items only for the parts that are present (a tool-only turn
+// yields just its function_call / function_call_output items, no message item).
 const toCodexMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
   messages.map(normalizeTurn)
-    .map((t) => ({ role: t.role, content: t.text, images: t.images }))
-    .filter((m) => m.content || (m.images?.length ?? 0) > 0);
+    .map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
 // ----------------------------- Provider ----------------------------- //
 
@@ -130,16 +130,22 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
     const controller = new AbortController();
     token.onCancellationRequested(() => controller.abort());
 
-    // Codex speaks the Responses API, not chat completions — stream its text reply through the dedicated
-    // client. Codex advertises toolCalling so the picker shows it, but the tools aren't forwarded yet
-    // (wired in Slice 4): options.tools is ignored, so the model just answers as text deltas.
+    // Codex speaks the Responses API, not chat completions — stream it through the dedicated client. Agent
+    // tools are forwarded as strict Responses tools; codexStream yields text fragments live and the
+    // assembled tool calls at the end, which map to text / tool-call parts exactly like the OpenAI path.
     if (isCodexProvider(provider)) {
       const creds = await deps.codexCreds();
       if (!creds) return; // only signed-in Codex is advertised — rare sign-out race
       const baseUrl = resolveBaseUrl(provider, deps.customBaseUrl());
+      const tools = toCodexResponsesTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
+      const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
       try {
-        for await (const delta of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), signal: controller.signal })) {
-          progress.report(new vscode.LanguageModelTextPart(delta));
+        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), tools, toolChoice, signal: controller.signal })) {
+          if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
+          // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
+          let input: object = {};
+          try { input = ev.call.argsJson ? JSON.parse(ev.call.argsJson) : {}; } catch { /* keep {} */ }
+          progress.report(new vscode.LanguageModelToolCallPart(ev.call.id, ev.call.name, input));
         }
       } catch (err) {
         if (controller.signal.aborted) return; // user cancelled — normal, not a failure

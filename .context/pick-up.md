@@ -9,34 +9,31 @@ tags: [context, pick-up]
 
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate.
 
-**Last session (2026-06-19):** Built + shipped **slice #14 — Codex in the native chat picker (text streaming)**
-on branch **`feat/codex-tracer`**. Codex now appears in VS Code's native chat / Ctrl+I picker when signed in
-and **streams** its text reply through the Responses API, with **real context windows** (gpt-5.x 400K / o-series
-200K) and **vision** (image attachments forwarded as `input_image`). New pure cores in `catalog.ts` (TDD) +
-`codexStream` in `codexClient.ts`. **`npm test` 121/121, tsc+webview+vite clean, F5 PASSED** (shows, streams,
-400K, Vision badge, image + multi-turn round-trip).
+**Last session (2026-06-19):** Built + shipped **slice #15 — Codex tool-calling parity (agent mode)** on
+branch **`feat/codex-tracer`**. The codex chat branch now **forwards agent tools and round-trips tool
+calls/results**, so the `toolCalling: true` flag (flipped in #14 for picker visibility) is now **honest**.
+New pure cores in `catalog.ts` (TDD): `toCodexResponsesTools` (+ recursive strict-schema enforcer),
+`reduceResponsesToolCalls` (Responses analogue of `assembleToolCalls`), and `buildCodexResponsesBody`
+extended to serialize `function_call` / `function_call_output` round-trip items. `codexStream`
+(`codexClient.ts`) yield widened `string` → **`CodexStreamEvent`** union; `chatProvider` threads tools in
+and emits text / tool-call parts. **`npm test` 137/137, tsc+webview+vite clean, F5 PASSED** — Codex fired
+5 parallel `Read` tool calls, results round-tripped, summary reflected real file contents.
 
-**Next task: build slice #15 — Codex tool-calling parity (agent mode).** HITL, unblocked. Enter with
-**`/preset scope 15`**.
+**This completes PRD #11 (slices #12–#15).** The Codex Provider + OpenCode Zen/Go batch is feature-complete.
 
-**What #15 must do:** the codex chat branch already advertises `toolCalling: true` but **ignores
-`options.tools`** (text-only — it just streams text). Wire the real path:
-- **Convert tools** — VS Code tool defs → Responses `tools` array; add them to `buildCodexResponsesBody` /
-  `codexResponsesRequest`.
-- **Stream tool calls** — in `codexStream`, the SSE carries `function_call` items (via
-  `response.output_item.added` + argument deltas); accumulate them and emit `LanguageModelToolCallPart`
-  (mirror the chat-completions `assembleToolCalls` pattern, but for Responses events).
+**Next task: SHIP the branch — `feat/codex-tracer` (#13+#14+#15) → PR / merge to `main`.** Enter with
+**`/preset ship`**. There is no remaining slice in PRD #11; if instead starting new work, `/preset init`.
 
-**Landmines:**
-- Reference: `XETH--7` `src/services/api/codexShim.ts` — `convertToolsToResponsesTools` (+ its strict-schema
-  `required` enforcement) and the Responses tool-call event handling (`D:\Mods\xethryon\new agent\XETH--7`).
-- The Codex `/responses` backend **requires `instructions`** (defaults to "You are a helpful coding assistant."
-  when no system turn — VS Code chat has no System role). Assistant content is **`output_text`**, user/system
-  `input_text` — wrong type 400s. Images (`input_image`) only on non-assistant turns.
-- The picker **hard-filters on `toolCalling`** — that's why Codex advertises true now; once tools forward,
-  the advertise becomes fully honest (it currently reverses #14's acceptance #3 — see [[decisions]]).
-- Bearer = OAuth **access_token** (subscription path); reasoning models need `reasoning:{effort,summary:'auto'}`
-  (`codexReasoning`); `gpt-5-codex` is a dead id (default `gpt-5.3-codex`).
-- #14 shares `catalog.ts` + `chatProvider.ts` + `codexClient.ts` with committed #12/#13 — build on it.
+**Landmines / things to know:**
+- **#15 is uncommitted-then-committed this session** — if the commit didn't land, the working tree holds the
+  #15 diff (`catalog.ts`, `chatProvider.ts`, `codexClient.ts`, `codex.test.ts`). Verify with `git log`.
+- **Replayed `function_call` items use `call_id` only (no `id`)** — F5-proven sufficient. If a future
+  multi-turn agent round-trip 400s, add a derived `id` (`fc_…`) to the item in `buildCodexResponsesBody`
+  (one line + one test). See [[gotchas]] "Codex tools must be STRICT…".
+- **Codex tools must be STRICT** (every object closed + all keys required) — `enforceStrictResponsesSchema`
+  does this; don't loosen it (Codex 400s open objects). The tool shape is **flat**, not chat-completions'
+  nested `function` — don't reuse `toOpenAiTools` for Codex.
+- Reference for the Responses tool shapes: `XETH--7` `src/services/api/codexShim.ts`
+  (`D:\Mods\xethryon\new agent\XETH--7`).
 
-Full state in [[active-work]]; settled choices in [[decisions]]; new traps in [[gotchas]]; domain language in `CONTEXT.md`.
+Full state in [[active-work]]; settled choices in [[decisions]]; traps in [[gotchas]]; domain language in `CONTEXT.md`.

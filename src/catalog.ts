@@ -302,9 +302,9 @@ export const buildChatModelInfos = (
       maxInputTokens,
       maxOutputTokens,
       // Tool calling advertised for EVERY row — VS Code hides non-tool models from the chat/Ctrl+I picker
-      // entirely, so even Codex must declare it to be selectable (its tools are wired in Slice 4; until then
-      // it simply answers as text). imageInput from models.dev's modalities (Codex: from codexModelCaps),
-      // else the id heuristic — Codex forwards images as input_image parts, so vision flows through honestly.
+      // entirely. Honest for all: the OpenAI rows forward tools via the chat client, Codex via strict
+      // Responses tools (its round-trip is wired). imageInput from models.dev's modalities (Codex: from
+      // codexModelCaps), else the id heuristic — Codex forwards images as input_image parts, so vision is honest too.
       capabilities: { toolCalling: true, ...((dyn?.vision ?? modelSupportsVision(model)) ? { imageInput: true } : {}) },
     }];
   });
@@ -456,39 +456,116 @@ export type CodexReasoning = { effort: 'low' | 'medium' | 'high'; summary: 'auto
 // replayed assistant turn) or an image (input_image as a base64 data-URI / url).
 export type CodexContentPart = { type: 'input_text' | 'output_text'; text: string } | { type: 'input_image'; image_url: string };
 
+// One Responses `input` item. A message turn, OR — for an agent round-trip — a function_call (a prior
+// assistant tool call, replayed) / function_call_output (its result), which are top-level items, NOT
+// message content. call_id ties the call to its output (the API matches them by it).
+export type CodexInputItem =
+  | { type: 'message'; role: string; content: CodexContentPart[] }
+  | { type: 'function_call'; call_id: string; name: string; arguments: string }
+  | { type: 'function_call_output'; call_id: string; output: string };
+
+// A Responses-API function tool. FLAT (name/description/parameters at top level), unlike chat completions'
+// nested `function` object. strict:true makes Codex honour the schema exactly — which is why every object
+// in `parameters` must be closed (additionalProperties:false) with all its keys required.
+export type CodexResponsesTool = { type: 'function'; name: string; description: string; parameters: Record<string, unknown>; strict: true };
+
 export type CodexResponsesBody = {
   model: string;
   instructions: string;
-  input: { type: 'message'; role: string; content: CodexContentPart[] }[];
+  input: CodexInputItem[];
   reasoning?: CodexReasoning;
   store: false;
   stream: true;
+  tools?: CodexResponsesTool[];
+  tool_choice?: 'auto' | 'required';
+  parallel_tool_calls?: boolean;
 };
+
+// Recursively coerce a JSON schema into Codex strict mode: every object closes (additionalProperties:false)
+// and lists ALL its property keys in `required` — Codex strict tools reject any object that doesn't. Recurses
+// through properties, array items, and the anyOf/oneOf/allOf combinators. A non-object schema (a leaf like
+// {type:'string'}) is returned untouched; a non-schema value degrades to {} rather than throwing.
+const enforceStrictResponsesSchema = (schema: unknown): Record<string, unknown> => {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return {};
+  const record: Record<string, unknown> = { ...(schema as Record<string, unknown>) };
+  if (record.type === 'object') {
+    record.additionalProperties = false;
+    const props = record.properties && typeof record.properties === 'object' && !Array.isArray(record.properties)
+      ? (record.properties as Record<string, unknown>) : undefined;
+    if (props) {
+      const enforced: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(props)) enforced[key] = enforceStrictResponsesSchema(value);
+      record.properties = enforced;
+      record.required = Object.keys(enforced);
+    } else {
+      record.required = [];
+    }
+  }
+  if ('items' in record) {
+    record.items = Array.isArray(record.items)
+      ? (record.items as unknown[]).map(enforceStrictResponsesSchema)
+      : enforceStrictResponsesSchema(record.items);
+  }
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    if (Array.isArray(record[key])) record[key] = (record[key] as unknown[]).map(enforceStrictResponsesSchema);
+  }
+  return record;
+};
+
+// Map VS Code tool defs to strict Responses function tools. A tool with no schema gets an empty closed
+// object ({} forced to a strict object), so the API still sees a valid (and strict) parameters field.
+export const toCodexResponsesTools = (tools: ToolSpec[]): CodexResponsesTool[] =>
+  tools.map((t) => ({
+    type: 'function',
+    name: t.name,
+    description: t.description,
+    parameters: enforceStrictResponsesSchema(t.inputSchema ?? { type: 'object', properties: {} }),
+    strict: true,
+  }));
 
 // The Codex backend REQUIRES a non-empty instructions field (400 "Instructions are required" otherwise).
 // The native-chat path has no system turn — VS Code's chat API has no System role — so fall back to this.
 const CODEX_DEFAULT_INSTRUCTIONS = 'You are a helpful coding assistant.';
 
 // Translate a conversation into a Codex Responses request body. Inquire passes its EditMessage[] (a system
-// + a user message); the native-chat path passes user/assistant turns, optionally with images. System
-// content becomes `instructions`, defaulting when there is none so the backend never sees it absent. Every
-// other message becomes a message item: text typed by role (assistant→output_text, else input_text), then
-// any images as input_image data-URIs — but only on non-assistant turns, since the API rejects input_image
-// on assistant items. reasoning is included only when supplied — reasoning models REQUIRE it (else 400),
-// non-reasoning models REJECT it, so the caller decides per model via codexReasoning().
-export const buildCodexResponsesBody = (args: { model: string; messages: { role: 'system' | 'user' | 'assistant'; content: string; images?: { mimeType: string; dataBase64: string }[] }[]; reasoning?: CodexReasoning }): CodexResponsesBody => {
+// + a user message); the native-chat path passes user/assistant turns, optionally with images and — in
+// agent mode — tool calls and results. System content becomes `instructions`, defaulting when there is none
+// so the backend never sees it absent. Each non-system turn expands to its items in API-required order:
+// an assistant turn's text (output_text) message then its function_call items; a user turn's
+// function_call_output items then its text (input_text) + image (input_image) message. A turn with no
+// content/images yields no message item (a tool-only turn is just its call/result items). reasoning rides
+// only when supplied (reasoning models REQUIRE it, others REJECT it). tools (already strict-converted) ride
+// only when non-empty, with tool_choice (default 'auto') + parallel_tool_calls — a tool_choice with no tools 400s.
+export const buildCodexResponsesBody = (args: {
+  model: string;
+  messages: { role: 'system' | 'user' | 'assistant'; content: string; images?: { mimeType: string; dataBase64: string }[]; toolCalls?: { id: string; name: string; argsJson: string }[]; toolResults?: { callId: string; content: string }[] }[];
+  reasoning?: CodexReasoning;
+  tools?: CodexResponsesTool[];
+  toolChoice?: 'auto' | 'required';
+}): CodexResponsesBody => {
   const instructions = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || CODEX_DEFAULT_INSTRUCTIONS;
-  const input = args.messages
-    .filter((m) => m.role !== 'system')
-    .map((m) => {
-      const textType = m.role === 'assistant' ? 'output_text' as const : 'input_text' as const;
+  const input: CodexInputItem[] = [];
+  for (const m of args.messages) {
+    if (m.role === 'system') continue;
+    if (m.role === 'assistant') {
+      if (m.content) input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: m.content }] });
+      for (const tc of m.toolCalls ?? []) input.push({ type: 'function_call', call_id: tc.id, name: tc.name, arguments: tc.argsJson });
+    } else {
+      // A tool result is its own top-level item and must precede the user's text so the
+      // assistant(function_call) → function_call_output ordering the API requires is preserved.
+      for (const tr of m.toolResults ?? []) input.push({ type: 'function_call_output', call_id: tr.callId, output: tr.content });
       const content: CodexContentPart[] = [];
-      if (m.content) content.push({ type: textType, text: m.content });
-      if (m.role !== 'assistant') for (const img of m.images ?? []) content.push({ type: 'input_image', image_url: `data:${img.mimeType};base64,${img.dataBase64}` });
-      if (content.length === 0) content.push({ type: textType, text: '' }); // a message item needs ≥1 part
-      return { type: 'message' as const, role: m.role, content };
-    });
-  return { model: args.model, instructions, input, ...(args.reasoning ? { reasoning: args.reasoning } : {}), store: false, stream: true };
+      if (m.content) content.push({ type: 'input_text', text: m.content });
+      for (const img of m.images ?? []) content.push({ type: 'input_image', image_url: `data:${img.mimeType};base64,${img.dataBase64}` });
+      if (content.length) input.push({ type: 'message', role: 'user', content });
+    }
+  }
+  return {
+    model: args.model, instructions, input,
+    ...(args.reasoning ? { reasoning: args.reasoning } : {}),
+    store: false, stream: true,
+    ...(args.tools && args.tools.length ? { tools: args.tools, tool_choice: args.toolChoice ?? 'auto', parallel_tool_calls: true } : {}),
+  };
 };
 
 // The reasoning object to send for a Codex model, or undefined when it must be omitted. gpt-5 / o-series
@@ -550,6 +627,33 @@ export const extractResponsesText = (response: any): string => {
     }
   }
   return text;
+};
+
+// Reassemble streamed Responses function-call events into whole tool calls — the Responses analogue of
+// assembleToolCalls. A call is announced by response.output_item.added (its item carries id/call_id/name and
+// maybe an initial arguments fragment); its arguments then stream as response.function_call_arguments.delta
+// events keyed by item_id. Accumulate by the item id (what the deltas reference) but surface call_id as the
+// id — that is what round-trips to the function_call_output. Returned in first-seen order; a call that never
+// announced a name is dropped (it can't be invoked).
+export const reduceResponsesToolCalls = (events: CodexResponsesEvent[]): AssembledToolCall[] => {
+  const byItemId = new Map<string, AssembledToolCall>();
+  for (const ev of events) {
+    if (ev.event === 'response.output_item.added' && ev.data?.item?.type === 'function_call') {
+      const item = ev.data.item;
+      const itemId = String(item.id ?? item.call_id ?? '');
+      const call = byItemId.get(itemId) ?? { id: '', name: '', argsJson: '' };
+      call.id = item.call_id ?? item.id ?? call.id;
+      if (typeof item.name === 'string') call.name = item.name;
+      if (typeof item.arguments === 'string') call.argsJson += item.arguments;
+      byItemId.set(itemId, call);
+    } else if (ev.event === 'response.function_call_arguments.delta') {
+      const itemId = String(ev.data?.item_id ?? '');
+      const call = byItemId.get(itemId) ?? { id: '', name: '', argsJson: '' };
+      if (typeof ev.data?.delta === 'string') call.argsJson += ev.data.delta;
+      byItemId.set(itemId, call);
+    }
+  }
+  return [...byItemId.values()].filter((c) => c.name);
 };
 
 // Reduce the Codex Responses SSE stream to plain answer text. Text streams as response.output_text.delta
