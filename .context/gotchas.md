@@ -1,7 +1,7 @@
 ---
 type: gotchas
 project: wisp
-updated: 2026-06-18
+updated: 2026-06-19
 tags: [context, gotchas]
 ---
 
@@ -103,6 +103,37 @@ wrong-region false match. The fuzzy-matching fork is deferred; take it only if m
 real use. The throwaway `[debug]` reply/`trimmedMatch` instrumentation in `inquire` (used to tell
 indent-drift from paraphrase) was removed after diagnosis — re-add it the same way if revisiting. See
 [[decisions]] 2026-06-17 edit-blocks-built entry.
+
+### Codex: bearer is the access_token, NOT the exchanged API key
+For the subscription path (`https://chatgpt.com/backend-api/codex/responses`), the bearer is the OAuth
+**`access_token`** + the `chatgpt-account-id` header. The id_token→`sk-` exchange (`exchangeCodexIdTokenForApiKey`
+in the reference) produces an **API-platform** key billed against `api.openai.com` — a *different* endpoint. Wisp
+keeps `apiKey` only as a fallback; `codexClient` sends `creds.accessToken || creds.apiKey`. Don't switch the
+default bearer to the exchanged key — it routes off the subscription. `chatgpt-account-id` is **hard-required**:
+absent → error early (`codexClient` throws) rather than send a header-less request that 401/403s opaquely.
+
+### Codex reasoning models REQUIRE a `reasoning` object — and `gpt-5-codex` is a dead id
+The Codex `/responses` backend **400s** a gpt-5/o-series request that omits `reasoning: { effort, summary:'auto' }`,
+and **400s** a gpt-4.x/spark request that *includes* it — so it's per-model (`codexReasoning` in `catalog.ts`:
+`medium` for gpt-5/o, undefined for gpt-4.x/`*-spark`). Separately, **`gpt-5-codex` is not a valid model id**
+(400); the live lineup is `gpt-5.5`/`gpt-5.4`/`gpt-5.3-codex`/`gpt-5.3-codex-spark`/`gpt-5.2-codex`/
+`gpt-5.1-codex-max`/`gpt-5.1-codex-mini`/`gpt-5.4-mini`/`o3`/`o4-mini` (the codex row default is `gpt-5.3-codex`).
+There is **no `/models` route** on the Codex backend, so the dropdown uses the hardcoded `CODEX_MODELS` list,
+not a live fetch. Both confirmed by the #13 F5 round-trip. See [[decisions]] 2026-06-19.
+
+### Codex sign-out must write a tombstone, not delete the slot
+`CodexAuth.signOut` stores an empty `{}` to `wisp.codexAuth` instead of `secrets.delete`. If it deleted, the
+next `current()`/`isSignedIn()` would **re-import `~/.codex/auth.json`** (a Codex-CLI login) and instantly
+re-sign-in — sign-out would never stick for a CLI user. A present-but-bearer-less blob reads as signed-out
+*and* suppresses the import. Only an **unwritten** slot (undefined) triggers the one-time auth.json import; a
+tombstone does not. Don't "simplify" sign-out back to a delete.
+
+### Codex is hidden from the native chat picker until #14 (keyless + wrong transport)
+The Codex row is keyless (`apiKeyEnv:''`, no `keyId`), so `keyForProvider` returns '' → `buildChatModelInfos`
+hides it from VS Code's Language Models / Ctrl+I picker (keyless = hidden, by design). That's intentional for
+#13: even if advertised, `chatProvider.ts`'s `provideLanguageModelChatResponse` streams through the OpenAI
+**chat-completions** client, which 404s against the Codex `/responses` endpoint. #14 fixes both together
+(advertise-when-signed-in + a Responses streaming branch). Inquire works because it has its own codex branch.
 
 ## Related
 - [[api]]

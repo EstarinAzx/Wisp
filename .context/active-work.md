@@ -1,41 +1,40 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-18
+updated: 2026-06-19
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-18 23:40 by Opus 4.8._
-_At commit: uncommitted (branch `docs/codex-zen-go-scope`)._
+_Last updated: 2026-06-19 by Opus 4.8._
+_At commit: uncommitted (branch `feat/codex-tracer`, off `docs/codex-zen-go-scope` which holds the committed #12)._
 
 ## Current focus
-Building the **Codex Provider + OpenCode Zen/Go split** batch (PRD **#11**, slices **#12–#15**). **#12 is DONE** (the Zen/Go split); the Codex Provider (#13–#15) is the remaining work.
+Building the **Codex Provider + OpenCode Zen/Go split** batch (PRD **#11**, slices **#12–#15**). **#12 + #13 are DONE.** Codex sign-in + one live Inquire edit works end-to-end. Remaining: **#14** (Codex in the native chat picker — streaming) → **#15** (tool-calling parity).
 
 ## State
-- **Done this session — slice #12 (Zen/Go split + key migration):** renamed the misnamed `opencode-zen` row → **`opencode-go`** ("OpenCode Go", kept default, id now matches `catalogKey`), added a new **`opencode-zen`** row for `/zen/v1` (`catalogKey: 'opencode'`, `defaultModel: claude-haiku-4-5`). New pure `planZenToGoMigration` + `resolveKeyId` in `catalog.ts` (TDD). `migrateLegacyKey` re-pointed to the go slot; new `migrateZenToGo` runs first on activate. `package.json` enum/default synced. `npm test` **73/73**, `npm run compile` clean, **F5 eyeball PASSED**.
-- **In flight:** nothing — #12 is finished, about to commit.
+- **Done this session — slice #13 (Codex tracer):** Codex is a working Provider via ChatGPT OAuth. New pure cores in `catalog.ts` (TDD): `isCodexProvider`, `isCodexSignedIn`, `buildCodexResponsesBody`, `reduceResponsesTextEvents`/`extractResponsesText`, `decodeJwtPayload`/`parseChatgptAccountId`/`shouldRefreshCodexToken`, `parseCodexAuthJson`, `codexReasoning`, `CODEX_MODELS` + the `Provider.kind` field. New impure modules `codexAuth.ts` (PKCE S256 OAuth, loopback `:1455`, SecretStorage `wisp.codexAuth`, `~/.codex/auth.json` import, refresh) + `codexClient.ts` (raw `/responses` fetch, SSE→text). `extension.ts` wires the Codex row, the Inquire codex branch, sign-in/out commands, panel state. Panel shows sign-in (no key field) + a curated Codex model dropdown. **`npm test` 111/111, tsc (host+webview) + Vite clean, F5 live round-trip PASSED** (a real Inquire edit ran against the Codex backend).
+- **In flight:** nothing — #13 finished, about to commit.
 - **Planned next (GitHub issues, dependency order):**
-  - **#13 (HITL)** — Codex tracer: ChatGPT OAuth sign-in + one Inquire edit. *Unblocked — grab next.*
-  - **#14 (HITL)** — Codex in native chat (text streaming). Blocked by #13.
+  - **#14 (HITL)** — Codex in the native chat picker, **text streaming**. *Grab next.*
   - **#15 (HITL)** — Codex tool-calling parity (agent mode). Blocked by #14.
 - **Blocked:** nothing.
 
 ## Pick up here
-Grab **#13** — `/preset scope 13`. Codex = a discriminated **`kind: 'openai-chat' | 'codex'`** Provider row. Pure logic (Responses-event reducer, request builder, JWT parse + refresh decision, `~/.codex/auth.json` parser, codex-usable branch) → `catalog.ts` (TDD, `npm test`). Impure (OAuth/IO, loopback `:1455`, browser, token store, live Responses fetch) → new `codexAuth.ts` + `codexClient.ts`. Tokens in SecretStorage `wisp.codexAuth`; import `~/.codex/auth.json` if present; refresh at `exp − 60s`. OAuth = the **published Codex-CLI app** (`client_id app_EMoamEEZ73f0Ck…`, redirect `localhost:1455/auth/callback`, PKCE S256, originator `codex_cli_rs`). Reference impl: `D:\Mods\xethryon\new agent\XETH--7`. **#13 must do a live round-trip** to validate the originator/headers + stream shape before #14/#15 build on it. #13 shares `catalog.ts` + the `Provider` type with #12's now-committed work — no conflict, just build on it.
+Grab **#14** — `/preset scope 14`. **Goal: make Codex appear in and work through VS Code's native Language Models / Ctrl+I picker** (it's deliberately absent now — see below). Two coupled changes: (1) advertise the Codex row when **signed in** — currently keyless rows are hidden by `buildChatModelInfos`, so feed `keyed[codex] = await codexAuth.isSignedIn()` (and stop relying on `keyForProvider` returning '' for codex); (2) branch `provideLanguageModelChatResponse` in `chatProvider.ts` to the **Codex Responses streaming** path for `kind === 'codex'` rows (the current path uses the OpenAI chat-completions client → 404 against `/responses`). Reuse `codexClient`/`reduceResponsesTextEvents` but make it **stream** (the picker streams deltas) — likely a new streaming variant of `codexInquire` that yields `response.output_text.delta` text as it arrives, plus `codexAuth.current()` for refreshed creds. Keep `toolCalling` **false** for codex until #15. Reference: `XETH--7` `codexShim.ts` `codexStreamToAnthropic` (the streaming reducer).
 
 ## Skills for next session
-- `superpowers:test-driven-development` — TDD the pure Codex cores into `catalog.ts`.
-- `/preset scope 13` — entry gate before coding #13.
+- `superpowers:test-driven-development` — TDD any new pure cores (e.g. a streaming-delta reducer) into `catalog.ts`.
+- `/preset scope 14` — entry gate before coding #14.
 
 ## Open questions
-- Codex Responses backend accepts our originator/headers + stream shape — validate with the **live round-trip in #13** before #14/#15.
+- The Codex `reasoning` effort is a fixed `medium` for all gpt-5/o models. If a model needs `high` (or rejects `medium`), make it per-model. Not yet observed.
 
 ## Recent context
-- **#12 verified findings:** `GET /zen/v1/models` is **public** (no key needed) and serves **bare** ids (`claude-opus-4-8`, `gpt-5.5`, `gemini-3.5-flash`); `/zen/v1` is the **premium** catalog (Claude/GPT/Gemini), distinct from Go's budget `/zen/go/v1`. Default `claude-haiku-4-5` is best-effort (cheapest verified-present model).
-- **#12 non-obvious fix (from F5):** the new keyless Zen row was hidden from the chat picker (`buildChatModelInfos` hides keyless Providers). Fixed by `keyId` — OpenCode Go + Zen are one account/one key, so Zen borrows Go's slot via `keyId: 'opencode-go'`. See [[gotchas]].
-- The Codex case **supersedes the 2026-06-15 "no OAuth subsystem" decision**; Copilot/Cursor stay dropped. See [[decisions]].
+- **#13 live findings (F5):** `gpt-5-codex` is a **dead model id** (400) — current Codex ids are `gpt-5.4`/`gpt-5.3-codex`/`gpt-5.2-codex`/`gpt-5.1-codex-max`/… The default is now **`gpt-5.3-codex`**. Reasoning models **require** a `reasoning: { effort, summary:'auto' }` object on the `/responses` body or they 400 — sent for gpt-5/o models, omitted for gpt-4.x/spark (`codexReasoning`). The bearer is the OAuth **access_token** (subscription path), NOT the exchanged `sk-` apiKey.
+- **#13 non-obvious fix:** sign-out must write an **empty tombstone** to `wisp.codexAuth`, not delete the slot — else `~/.codex/auth.json` is re-imported on the next render and sign-out never sticks. See [[gotchas]].
+- Codex is intentionally **absent from the native chat picker** in #13 (keyless → hidden, and the chat surface speaks chat-completions not Responses). That's exactly #14's job.
 
 ## Related
 - [[overview]]

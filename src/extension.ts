@@ -21,9 +21,12 @@ import OpenAI from 'openai';
 import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvider';
 import {
   Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, resolveKeyId, planLegacyMigration, planZenToGoMigration,
-  buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines,
+  buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines, isCodexProvider, isCodexSignedIn, CODEX_MODELS,
+  type CodexCreds,
 } from './catalog';
 import { registerWispChatProvider } from './chatProvider';
+import { CodexAuth } from './codexAuth';
+import { codexInquire } from './codexClient';
 
 // ----------------------------- Constants ----------------------------- //
 
@@ -59,6 +62,12 @@ const PROVIDERS: Provider[] = [
   // keyId 'opencode-go': same OpenCode account as Go (one key, two endpoints), so it borrows Go's stored
   // key instead of demanding a second entry — otherwise it stays hidden from the picker until re-keyed.
   { id: 'opencode-zen', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/v1', defaultModel: 'claude-haiku-4-5', apiKeyEnv: 'OPENCODE_API_KEY', catalogKey: 'opencode', keyId: 'opencode-go' },
+  // Codex = the subscription-backed ChatGPT Codex backend (Responses API, reached by OAuth, not an API
+  // key). kind:'codex' switches the Inquire/usability paths off the OpenAI-chat code. No apiKeyEnv — it
+  // is "usable when signed in". Base URL is the Codex backend; defaultModel is the Codex-tuned default.
+  // No catalogKey (not in models.dev) and it is intentionally absent from the native chat picker until
+  // the Responses tool-mapper lands (#15) — keyless rows are hidden there, which is correct for now.
+  { id: 'codex', label: 'Codex', baseUrl: 'https://chatgpt.com/backend-api/codex', defaultModel: 'gpt-5.3-codex', apiKeyEnv: '', kind: 'codex' },
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY', catalogKey: 'openai' },
   { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', apiKeyEnv: 'GROQ_API_KEY', catalogKey: 'groq' },
   { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', defaultModel: 'codestral-latest', apiKeyEnv: 'MISTRAL_API_KEY', catalogKey: 'mistral' },
@@ -92,6 +101,10 @@ let lastError = false;
 
 // Side panel handle so key/config changes can push fresh state into the webview.
 let panel: WispPanelProvider | undefined;
+
+// Codex OAuth/token lifecycle (sign-in, store, import, refresh). Set in activate once SecretStorage
+// exists; the Inquire codex branch + the sign-in/out commands + the panel state all go through it.
+let codexAuth: CodexAuth;
 
 // B2 inline-diff state. While a preview is on screen the buffer holds old+new lines together
 // (decorated), and exactly one preview is live at a time. `range` covers the rendered preview text;
@@ -259,6 +272,8 @@ const getState = async (): Promise<PanelState> => {
   const p = activeProvider();
   const stored = (await secrets.get(keySlotFor(p)))?.trim();
   const keySource = stored ? 'stored' : p.apiKeyEnv && process.env[p.apiKeyEnv] ? 'env' : 'none';
+  // Codex has no API key — its panel shows sign-in state instead of the key field.
+  const signedIn = isCodexProvider(p) ? await codexAuth.isSignedIn() : false;
   return {
     keyIsSet: keySource !== 'none',
     keySource,
@@ -268,6 +283,10 @@ const getState = async (): Promise<PanelState> => {
     providerId: p.id,
     providers: PROVIDERS.map((r) => ({ id: r.id, label: r.label })), // drives the panel dropdown
     isCustom: p.id === CUSTOM_ID,
+    kind: p.kind ?? 'openai-chat',
+    signedIn,
+    // Codex has no /models route — offer the curated list instead of a live fetch.
+    modelOptions: isCodexProvider(p) ? CODEX_MODELS : undefined,
   };
 };
 
@@ -427,6 +446,26 @@ const setApiKey = async (): Promise<void> => {
   vscode.window.showInformationMessage('Wisp: API key saved.');
 };
 
+// Codex sign-in: run the browser OAuth flow, store the tokens, refresh the panel. Failure (cancelled /
+// port busy / network) is surfaced; a successful sign-in flips the Codex row to "usable".
+const codexSignIn = async (): Promise<void> => {
+  try {
+    await codexAuth.signIn();
+    vscode.window.showInformationMessage('Wisp: signed in to Codex.');
+    void panel?.postState();
+  } catch (err) {
+    output.appendLine(`[error] codex sign-in ${String(err)}`);
+    vscode.window.showErrorMessage(`Wisp: Codex sign-in failed — ${String(err)}`);
+  }
+};
+
+// Codex sign-out: clear the stored token bundle and refresh the panel.
+const codexSignOut = async (): Promise<void> => {
+  await codexAuth.signOut();
+  vscode.window.showInformationMessage('Wisp: signed out of Codex.');
+  void panel?.postState();
+};
+
 // List served models in a quick-pick and write the choice into the setting.
 const listModels = async (): Promise<void> => {
   if (!(await resolveApiKey())) {
@@ -468,12 +507,22 @@ const inquire = async (): Promise<void> => {
     return;
   }
 
-  if (!(await resolveApiKey())) {
+  // Two usability rules: Codex is usable when SIGNED IN (no API key); every other Provider when keyed.
+  const provider = activeProvider();
+  const codex = isCodexProvider(provider);
+  let creds: CodexCreds | undefined;
+  if (codex) {
+    creds = await codexAuth.current();
+    if (!isCodexSignedIn(creds)) {
+      vscode.window.showWarningMessage("Sign in to Codex first (command: 'Wisp: Sign in to Codex').");
+      return;
+    }
+  } else if (!(await resolveApiKey())) {
     vscode.window.showWarningMessage("Set your API key first (command: 'Wisp: Set API Key').");
     return;
   }
-  const client = await getClient();
-  if (!client) return;
+  const client = codex ? undefined : await getClient();
+  if (!codex && !client) return;
 
   const model = activeModel();
   const original = document.getText();
@@ -489,17 +538,22 @@ const inquire = async (): Promise<void> => {
       { location: vscode.ProgressLocation.Notification, title: 'Wisp: editing…', cancellable: true },
       async (_progress, token) => {
         token.onCancellationRequested(() => controller.abort());
-        const maxTokens = cfg().get<number>('maxTokens') ?? 0;
-        const res = await client.chat.completions.create(
-          {
-            model,
-            messages,
-            ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
-            temperature: cfg().get<number>('temperature') ?? 0.1,
-          },
-          { signal: controller.signal },
-        );
-        reply = res.choices[0]?.message?.content ?? '';
+        // Codex speaks the Responses API (its own client); every other Provider uses the OpenAI SDK.
+        if (codex) {
+          reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, signal: controller.signal });
+        } else {
+          const maxTokens = cfg().get<number>('maxTokens') ?? 0;
+          const res = await client!.chat.completions.create(
+            {
+              model,
+              messages,
+              ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}),
+              temperature: cfg().get<number>('temperature') ?? 0.1,
+            },
+            { signal: controller.signal },
+          );
+          reply = res.choices[0]?.message?.content ?? '';
+        }
       },
     );
     lastError = false;
@@ -559,6 +613,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
   output = vscode.window.createOutputChannel('Wisp');
   secrets = context.secrets;
   globalState = context.globalState;
+  // Codex token lifecycle — browser open goes through vscode.env.openExternal; logs to the Wisp channel.
+  codexAuth = new CodexAuth(context.secrets, (url) => vscode.env.openExternal(vscode.Uri.parse(url)), (m) => output.appendLine(m));
   // Silent one-time migrations, ordered: Zen→Go slot move (frees the zen slot for the new /zen/v1
   // provider) BEFORE the pre-catalog wisp.apiKey→go shim, so the rare both-present case can't orphan a
   // Go key in the zen slot. Both are idempotent on the go slot, so the pair is a no-op after the first.
@@ -586,6 +642,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
     setModel,
     setProvider,
     setBaseUrl,
+    codexSignIn,
+    codexSignOut,
   });
 
   context.subscriptions.push(
@@ -595,6 +653,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
     vscode.commands.registerCommand('wisp.setApiKey', setApiKey),
     vscode.commands.registerCommand('wisp.listModels', listModels),
     vscode.commands.registerCommand('wisp.inquire', inquire),
+    vscode.commands.registerCommand('wisp.codexSignIn', codexSignIn),
+    vscode.commands.registerCommand('wisp.codexSignOut', codexSignOut),
     // Internal — invoked by the inline-diff CodeLenses, not contributed to the palette.
     vscode.commands.registerCommand('wisp.acceptEdit', () => resolvePreview(true)),
     vscode.commands.registerCommand('wisp.rejectEdit', () => resolvePreview(false)),

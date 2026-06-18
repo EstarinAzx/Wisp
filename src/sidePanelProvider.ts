@@ -13,7 +13,7 @@
  *   - PanelHost: the shared action helpers injected from extension.ts (store/clear key, fetch
  *     model ids, set model/provider/baseUrl, read state + Activity) — avoids a circular import.
  *   - Webview → ext messages: ready | setApiKey{value} | clearApiKey | selectModel{value}
- *     | selectProvider{value} | setBaseUrl{value} | refreshModels.
+ *     | selectProvider{value} | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut.
  *   - Ext → webview messages: state{state} | models{ids} | modelsError{message} | activity{thinking}.
  */
 
@@ -31,6 +31,9 @@ export type PanelState = {
   providerId?: string; // Active Provider id (drives the dropdown's selected value)
   providers: { id: string; label: string }[]; // the catalog, for the dropdown
   isCustom: boolean; // active Provider is Custom → the panel reveals the editable base-URL field (Issue 7)
+  kind?: 'openai-chat' | 'codex'; // Codex swaps the API-key field for a sign-in/out control
+  signedIn?: boolean; // Codex only: whether a Codex token bundle is present
+  modelOptions?: string[]; // Codex only: curated model ids for the dropdown (no live /models route)
 };
 
 // Shared with extension.ts so the no-key failure is recognizable as webview-safe text.
@@ -45,6 +48,8 @@ export type PanelHost = {
   setModel: (id: string) => Promise<void>;
   setProvider: (id: string) => Promise<void>;
   setBaseUrl: (url: string) => Promise<void>;
+  codexSignIn: () => Promise<void>;
+  codexSignOut: () => Promise<void>;
 };
 
 // ----------------------------- Error sanitizing ----------------------------- //
@@ -128,6 +133,13 @@ export class WispPanelProvider implements vscode.WebviewViewProvider {
           void this.view?.webview.postMessage({ type: 'models', ids });
           return;
         }
+        case 'codexSignIn':
+          // The OAuth flow + its own postState live in the host; the panel just triggers it.
+          await this.host.codexSignIn();
+          return;
+        case 'codexSignOut':
+          await this.host.codexSignOut();
+          return;
       }
     } catch (err) {
       if (msg?.type === 'refreshModels') {

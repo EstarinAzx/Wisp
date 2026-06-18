@@ -26,6 +26,10 @@ export type Provider = {
   // sibling. Defaults to the row's own id. OpenCode Zen sets keyId='opencode-go' — both are the same
   // OpenCode account (one key, two endpoints), so Zen reuses Go's stored key rather than asking twice.
   keyId?: string;
+  // Provider kind: 'openai-chat' (the default — every OpenAI-compatible chat row) or 'codex' (the
+  // subscription-backed Codex Responses backend, reached by ChatGPT OAuth, not an API key). Absent ==
+  // 'openai-chat', so the ten existing rows need no edit; the Inquire/key/usability paths branch on it.
+  kind?: 'openai-chat' | 'codex';
   // Note: context/vision carry no per-row hints — both come from the ACTIVE model via models.dev
   // (catalogKey), else context = neutral default and vision = the modelSupportsVision heuristic.
 };
@@ -413,4 +417,199 @@ export const planZenToGoMigration = (
 ): { storeGoKey: string; setModel?: string; clearZenSlot: true } | null => {
   if (state.goKeyPresent || !state.zenSlotKey) return null;
   return { storeGoKey: state.zenSlotKey, ...(state.zenSlotModel ? { setModel: state.zenSlotModel } : {}), clearZenSlot: true };
+};
+
+// ----------------------------- Codex Provider (pure cores) ----------------------------- //
+
+// The credential bundle for the Codex Provider. Unlike every other row (a bearer API key), Codex is
+// reached via ChatGPT OAuth: an access/refresh/id token triple plus the ChatGPT account id. `apiKey` is
+// the optional id-token→API-key exchange result. The impure codexAuth.ts owns the OAuth/IO; this module
+// only reasons about an already-parsed blob.
+export type CodexCreds = {
+  accessToken?: string;
+  refreshToken?: string;
+  idToken?: string;
+  accountId?: string;
+  apiKey?: string;
+};
+
+// Whether a catalog row is the Codex backend. Absent kind == 'openai-chat', so this is false for the
+// ten OpenAI-compatible rows — they keep the API-key path untouched.
+export const isCodexProvider = (provider: Provider): boolean => provider.kind === 'codex';
+
+// Codex is "usable when signed in" — it has no API key, so usability is simply the presence of a bearer
+// credential (the OAuth access token, or the exchanged apiKey). The chat picker feeds this in as the
+// row's `keyed` flag so a not-signed-in Codex stays hidden, exactly like a keyless OpenAI-chat row.
+export const isCodexSignedIn = (creds: CodexCreds | undefined): boolean =>
+  !!creds && !!(creds.accessToken || creds.apiKey);
+
+// ----------------------------- Codex Responses request ----------------------------- //
+
+// The Codex backend speaks the OpenAI *Responses* API, not chat completions: the system prompt is a
+// top-level `instructions` string and the conversation is `input` message items whose text parts are
+// typed `input_text`. store:false (don't persist server-side); stream:true (we reduce the SSE to text).
+export type CodexReasoning = { effort: 'low' | 'medium' | 'high'; summary: 'auto' };
+
+export type CodexResponsesBody = {
+  model: string;
+  instructions?: string;
+  input: { type: 'message'; role: string; content: { type: 'input_text'; text: string }[] }[];
+  reasoning?: CodexReasoning;
+  store: false;
+  stream: true;
+};
+
+// Translate Inquire's EditMessage[] (a system message + a user message, from buildEditPrompt) into a
+// Codex Responses request body. System content becomes `instructions` (omitted entirely when empty, so
+// the backend never sees a blank string); every other message becomes an input_text message item.
+// reasoning is included only when supplied — reasoning models REQUIRE it (else the backend 400s), and
+// non-reasoning models REJECT it, so the caller decides per model via codexReasoning().
+export const buildCodexResponsesBody = (args: { model: string; messages: EditMessage[]; reasoning?: CodexReasoning }): CodexResponsesBody => {
+  const instructions = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const input = args.messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({ type: 'message' as const, role: m.role, content: [{ type: 'input_text' as const, text: m.content }] }));
+  return { model: args.model, ...(instructions ? { instructions } : {}), input, ...(args.reasoning ? { reasoning: args.reasoning } : {}), store: false, stream: true };
+};
+
+// The reasoning object to send for a Codex model, or undefined when it must be omitted. gpt-5 / o-series
+// are reasoning models and need it; the gpt-4.x and *-spark (fast-loop) variants reject it. Effort is a
+// fixed 'medium' — a sane Inquire default (quality without the latency of 'high').
+export const codexReasoning = (model: string): CodexReasoning | undefined => {
+  const m = model.toLowerCase();
+  if (m.includes('spark')) return undefined;
+  return /^(gpt-5|o3|o4)/.test(m) ? { effort: 'medium', summary: 'auto' } : undefined;
+};
+
+// Curated Codex model ids for the panel dropdown — the Codex backend has no /models route, so this
+// mirrors the Codex CLI's known lineup. The codex row's defaultModel must stay a member of this list.
+export const CODEX_MODELS: string[] = [
+  'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.3-codex-spark',
+  'gpt-5.2-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini', 'gpt-5.4-mini', 'o3', 'o4-mini',
+];
+
+// ----------------------------- Codex Responses reply ----------------------------- //
+
+// One parsed Server-Sent Event off the Codex Responses stream: the SSE `event:` name and its `data:` JSON.
+export type CodexResponsesEvent = { event: string; data: any };
+
+// Pull the answer text out of a *final* Responses object (the `response.completed` payload, or a
+// non-streamed reply). Walks output[] message items and concatenates every output_text part — reasoning
+// parts and function_call items are not answer text and are skipped. Tolerant of missing fields → ''.
+export const extractResponsesText = (response: any): string => {
+  const output = Array.isArray(response?.output) ? response.output : [];
+  let text = '';
+  for (const item of output) {
+    if (item?.type !== 'message' || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === 'output_text' && typeof part.text === 'string') text += part.text;
+    }
+  }
+  return text;
+};
+
+// Reduce the Codex Responses SSE stream to plain answer text. Text streams as response.output_text.delta
+// fragments; the terminal response.completed/incomplete event carries the authoritative full text. Prefer
+// that completed text when non-empty (guards a dropped/duplicated delta), else fall back to the joined
+// deltas. A response.failed event is a backend error — throw its message rather than return empty text.
+export const reduceResponsesTextEvents = (events: CodexResponsesEvent[]): string => {
+  let deltas = '';
+  let completedText = '';
+  for (const ev of events) {
+    if (ev.event === 'response.failed') {
+      throw new Error(ev.data?.response?.error?.message ?? ev.data?.error?.message ?? 'Codex response failed');
+    }
+    // Skip a non-string delta — coercing it (5 -> '5', {} -> '[object Object]') would corrupt the answer.
+    if (ev.event === 'response.output_text.delta') { if (typeof ev.data?.delta === 'string') deltas += ev.data.delta; }
+    // Only a non-empty terminal payload overwrites — so a later empty terminal (incomplete after
+    // completed, or a duplicate) can't blank an answer already captured.
+    else if (ev.event === 'response.completed' || ev.event === 'response.incomplete') {
+      const text = extractResponsesText(ev.data?.response);
+      if (text) completedText = text;
+    }
+  }
+  return completedText || deltas;
+};
+
+// ----------------------------- Codex OAuth token introspection ----------------------------- //
+
+// Decode a JWT's payload (the middle base64url segment) to its claims object; undefined for a non-JWT or
+// an unparseable payload. The token's signature is never verified — we only read claims (exp, account id)
+// the backend already issued to us, so this is introspection, not auth.
+export const decodeJwtPayload = (token: string): Record<string, unknown> | undefined => {
+  const parts = token.split('.');
+  if (parts.length < 2) return undefined;
+  try {
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// Extract the ChatGPT account id from an id/access token. Codex nests it under the namespaced auth claim
+// `https://api.openai.com/auth`.chatgpt_account_id (with flatter fallbacks seen across token versions).
+export const parseChatgptAccountId = (token: string | undefined): string | undefined => {
+  if (!token) return undefined;
+  const payload = decodeJwtPayload(token);
+  const nested = payload?.['https://api.openai.com/auth'];
+  const fromNested = nested && typeof nested === 'object' ? (nested as Record<string, unknown>).chatgpt_account_id : undefined;
+  // Fallbacks for token-version variance: a flat dotted key, then a bare claim.
+  const id = fromNested ?? payload?.['https://api.openai.com/auth.chatgpt_account_id'] ?? payload?.['chatgpt_account_id'];
+  return typeof id === 'string' && id.trim() ? id.trim() : undefined;
+};
+
+// Refresh the access token 60s BEFORE it expires, so an in-flight request can't have it die under it.
+const CODEX_TOKEN_REFRESH_SKEW_MS = 60_000;
+
+// The JWT `exp` claim (seconds) as epoch ms; undefined when the token carries no parseable expiry.
+const jwtExpiryMs = (token: string | undefined): number | undefined => {
+  if (!token) return undefined;
+  const exp = decodeJwtPayload(token)?.exp;
+  return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : undefined;
+};
+
+// Decide whether to refresh: true when the access token (else the id token) expires within the skew
+// window. No parseable expiry → false: we can't prove it's stale, so don't force a refresh (and a failed
+// refresh would just block a working token). `now` is injected so the decision stays pure and testable.
+export const shouldRefreshCodexToken = (creds: { accessToken?: string; idToken?: string }, now: number): boolean => {
+  const expiresAt = jwtExpiryMs(creds.accessToken) ?? jwtExpiryMs(creds.idToken);
+  return expiresAt !== undefined && expiresAt <= now + CODEX_TOKEN_REFRESH_SKEW_MS;
+};
+
+// ----------------------------- Codex auth.json import ----------------------------- //
+
+// A trimmed non-empty string, else undefined — so blank/null/non-string fields don't become "present".
+const trimmedString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() ? value.trim() : undefined;
+
+// Parse a ~/.codex/auth.json (written by the Codex CLI) into CodexCreds so an existing CLI login is
+// imported instead of forcing a fresh sign-in. The real shape nests the OAuth triple under `tokens`
+// (snake_case) alongside a possibly-null OPENAI_API_KEY; flatter fallbacks are tolerated. The account id
+// comes from tokens.account_id, else is derived from the id/access token. Returns undefined when no
+// usable bearer credential (neither a token nor an apiKey) is present — there is nothing to import.
+export const parseCodexAuthJson = (json: unknown): CodexCreds | undefined => {
+  if (!json || typeof json !== 'object') return undefined;
+  const root = json as Record<string, any>;
+  const tokens = (root.tokens && typeof root.tokens === 'object' ? root.tokens : {}) as Record<string, any>;
+
+  const accessToken = trimmedString(tokens.access_token ?? root.access_token);
+  const refreshToken = trimmedString(tokens.refresh_token ?? root.refresh_token);
+  const idToken = trimmedString(tokens.id_token ?? root.id_token);
+  const apiKey = trimmedString(root.OPENAI_API_KEY ?? root.openai_api_key);
+  const accountId =
+    trimmedString(tokens.account_id ?? root.account_id) ??
+    parseChatgptAccountId(idToken) ??
+    parseChatgptAccountId(accessToken);
+
+  if (!accessToken && !apiKey) return undefined;
+  return {
+    ...(accessToken ? { accessToken } : {}),
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(idToken ? { idToken } : {}),
+    ...(accountId ? { accountId } : {}),
+    ...(apiKey ? { apiKey } : {}),
+  };
 };

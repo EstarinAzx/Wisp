@@ -11,7 +11,7 @@
  *   - InMsg: state{state} | models{ids} | modelsError{message} | activity{thinking} — everything
  *     the extension sends. activity carries the live Thinking/Idle state, separate from state.
  *   - Outbound: ready | setApiKey{value} | clearApiKey | selectModel{value} | selectProvider{value}
- *     | setBaseUrl{value} | refreshModels.
+ *     | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut.
  */
 
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -27,6 +27,9 @@ type State = {
   providerId?: string;
   providers: { id: string; label: string }[];
   isCustom: boolean;
+  kind?: 'openai-chat' | 'codex';
+  signedIn?: boolean;
+  modelOptions?: string[];
 };
 
 type InMsg =
@@ -113,9 +116,11 @@ export const App = () => {
     if (value) vscode.postMessage({ type: 'setBaseUrl', value });
   };
 
-  // Keep the select truthful even before the live list is fetched (or when the configured
-  // model isn't served): show the current model as an extra option.
-  const options = models.includes(state.model) ? models : [state.model, ...models];
+  // Codex has no live /models list — use the curated modelOptions; every other Provider uses the
+  // fetched list. Either way, prepend the current model if it isn't already present so the select stays
+  // truthful (e.g. a stale gpt-5-codex pick still shows alongside the curated ids).
+  const baseOptions = state.kind === 'codex' ? (state.modelOptions ?? []) : models;
+  const options = baseOptions.includes(state.model) ? baseOptions : [state.model, ...baseOptions];
 
   return (
     <main class="flex flex-col gap-4 p-3">
@@ -175,35 +180,61 @@ export const App = () => {
         </section>
       )}
 
-      {/* ------------------------------ API key ------------------------------ */}
-      <section class="flex flex-col gap-1.5">
-        <h2 class="section-title">API Key</h2>
-        <p class="text-[var(--vscode-descriptionForeground)]">
-          {state.keySource === 'stored' ? '● Key set'
-            : state.keySource === 'env' ? `● Using ${state.keyEnv} from environment`
-            : '○ No key set'}
-        </p>
-        <input
-          class="input"
-          type="password"
-          placeholder="Paste API key"
-          value={keyDraft}
-          onInput={(e) => setKeyDraft(e.currentTarget.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') saveKey(); }}
-        />
-        <div class="flex gap-1.5">
-          <button class="btn" disabled={!keyDraft.trim()} onClick={saveKey}>
-            {state.keyIsSet ? 'Update' : 'Save'}
-          </button>
-          <button
-            class="btn btn-secondary"
-            disabled={state.keySource !== 'stored'} // Clear can't remove an env-provided key
-            onClick={() => vscode.postMessage({ type: 'clearApiKey' })}
-          >
-            Clear
-          </button>
-        </div>
-      </section>
+      {/* --------------------- Credentials: Codex sign-in OR API key --------------------- */}
+      {/* Codex has no API key — it is "usable when signed in", so it swaps the key field for a
+          ChatGPT sign-in/out control. Every other Provider keeps the API-key field. */}
+      {state.kind === 'codex' ? (
+        <section class="flex flex-col gap-1.5">
+          <h2 class="section-title">Codex Account</h2>
+          <p class="text-[var(--vscode-descriptionForeground)]">
+            {state.signedIn ? '● Signed in' : '○ Not signed in'}
+          </p>
+          <div class="flex gap-1.5">
+            <button class="btn" disabled={state.signedIn} onClick={() => vscode.postMessage({ type: 'codexSignIn' })}>
+              Sign in
+            </button>
+            <button
+              class="btn btn-secondary"
+              disabled={!state.signedIn}
+              onClick={() => vscode.postMessage({ type: 'codexSignOut' })}
+            >
+              Sign out
+            </button>
+          </div>
+          <p class="text-xs text-[var(--vscode-descriptionForeground)]">
+            Subscription-backed ChatGPT Codex — sign in with your ChatGPT account; no API key.
+          </p>
+        </section>
+      ) : (
+        <section class="flex flex-col gap-1.5">
+          <h2 class="section-title">API Key</h2>
+          <p class="text-[var(--vscode-descriptionForeground)]">
+            {state.keySource === 'stored' ? '● Key set'
+              : state.keySource === 'env' ? `● Using ${state.keyEnv} from environment`
+              : '○ No key set'}
+          </p>
+          <input
+            class="input"
+            type="password"
+            placeholder="Paste API key"
+            value={keyDraft}
+            onInput={(e) => setKeyDraft(e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') saveKey(); }}
+          />
+          <div class="flex gap-1.5">
+            <button class="btn" disabled={!keyDraft.trim()} onClick={saveKey}>
+              {state.keyIsSet ? 'Update' : 'Save'}
+            </button>
+            <button
+              class="btn btn-secondary"
+              disabled={state.keySource !== 'stored'} // Clear can't remove an env-provided key
+              onClick={() => vscode.postMessage({ type: 'clearApiKey' })}
+            >
+              Clear
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* ------------------------------ Model ------------------------------ */}
       <section class="flex flex-col gap-1.5">
@@ -216,13 +247,17 @@ export const App = () => {
           >
             {options.map((id) => <option key={id} value={id}>{id}</option>)}
           </select>
-          <button
-            class="btn btn-secondary shrink-0"
-            title="Refresh model list from the endpoint"
-            onClick={() => { setModelsError(''); vscode.postMessage({ type: 'refreshModels' }); }}
-          >
-            ↻
-          </button>
+          {/* Codex has no /models route (it is not the OpenAI-chat client), so hide the live refresh —
+              the user types the Codex model id (e.g. gpt-5-codex) in the field below. */}
+          {state.kind !== 'codex' && (
+            <button
+              class="btn btn-secondary shrink-0"
+              title="Refresh model list from the endpoint"
+              onClick={() => { setModelsError(''); vscode.postMessage({ type: 'refreshModels' }); }}
+            >
+              ↻
+            </button>
+          )}
         </div>
         <input
           class="input"

@@ -53,6 +53,14 @@
       {
         "command": "wisp.inquire",
         "title": "Wisp: Inquire"
+      },
+      {
+        "command": "wisp.codexSignIn",
+        "title": "Wisp: Sign in to Codex"
+      },
+      {
+        "command": "wisp.codexSignOut",
+        "title": "Wisp: Sign out of Codex"
       }
     ],
     "menus": {
@@ -82,6 +90,7 @@
           "enum": [
             "opencode-go",
             "opencode-zen",
+            "codex",
             "openai",
             "groq",
             "mistral",
