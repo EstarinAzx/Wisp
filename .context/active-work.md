@@ -8,70 +8,53 @@ tags: [context, active-work]
 # Active Work
 
 _Last updated: 2026-06-19 by Opus 4.8._
-_At commit: about to commit slice #15 (branch `feat/codex-tracer`); #12–#14 committed (HEAD `774354b`)._
+_At commit: `main` = `568942c` (clean; v1.1.0 released)._
 
 ## Current focus
-**Codex Provider + OpenCode Zen/Go split batch is COMPLETE** — PRD **#11**, slices **#12–#15** all done.
-Codex now has **full parity** across both surfaces: Inquire edits AND VS Code's native chat / agent /
-Ctrl+I — text streaming, real context windows, vision, **and tool calling** (agent-mode round-trip).
-Branch `feat/codex-tracer` holds #13/#14 (committed) + #15 (about to commit) and is ready to ship.
+**Shipped v1.1.0 and repositioned the product.** The Codex Provider + OpenCode Zen/Go batch (PRD #11,
+slices #12–#15) is merged to `main`, **released as v1.1.0**, and Wisp is now framed primarily as a
+**BYOK model router for VS Code's Copilot chat harness** (native chat / Agent / Ctrl+I), with Inquire as
+the secondary inline-edit surface. No feature work in flight.
 
 ## State
-- **Done this session — slice #15 (Codex tool-calling parity, agent mode):** the codex chat branch now
-  forwards agent tools and round-trips tool calls/results — the `toolCalling: true` flag (flipped in #14
-  for picker visibility) is now **honest**.
-  - **Tool converter:** new pure `toCodexResponsesTools` (`catalog.ts`) — VS Code tool defs → **flat**
-    Responses function tools (`{type,name,description,parameters,strict:true}`, NOT chat-completions'
-    nested `function` object). A self-contained recursive `enforceStrictResponsesSchema` makes every
-    object closed (`additionalProperties:false`) with **all** keys `required` — Codex strict mode demands it.
-  - **Tool-call reducer:** new pure `reduceResponsesToolCalls` (`catalog.ts`) — Responses analogue of
-    `assembleToolCalls`. Accumulates `response.output_item.added` (function_call id/call_id/name) +
-    `response.function_call_arguments.delta` (arg fragments) keyed by **item id**, surfaces **call_id** as
-    the round-trip id. Returns `AssembledToolCall[]`.
-  - **Round-trip serialization:** `buildCodexResponsesBody` extended — assistant tool calls →
-    `function_call` input items, tool results → `function_call_output` items, ordered per API
-    (function_call_output before the next user message). Body gains `tools`/`tool_choice`/
-    `parallel_tool_calls` only when tools are non-empty.
-  - **Stream widening:** `codexStream` (`codexClient.ts`) yield type `string` → **`CodexStreamEvent`**
-    union (`{type:'text'} | {type:'toolCall'}`); collects function-call events, folds them via the reducer
-    at stream end. `chatProvider` codex branch threads `options.tools`/`toolMode` in and emits
-    `LanguageModelTextPart` / `LanguageModelToolCallPart`. `toCodexMessages` now carries
-    `toolCalls`/`toolResults` (drop-filter removed so tool-only turns survive).
-  - **Verified:** `npm test` **137/137**, `npm run compile` clean (tsc host+webview + Vite). **F5 PASSED**
-    — agent mode, Codex (gpt-5.5) fired **5 parallel `Read` tool calls**, results fed back, summary
-    reflected actual file contents. Full model→tool→result→continue loop confirmed.
-- **In flight:** nothing — #15 finished, about to commit.
-- **Planned next:** **ship the branch** — `feat/codex-tracer` (#13+#14+#15) → PR / merge to `main`
-  (`/preset ship`). The Codex/Zen-Go batch is feature-complete; no slice left in PRD #11.
-- **Blocked:** nothing.
+- **Released v1.1.0** — GitHub release `v1.1.0` ("Copilot-harness model router"), marked Latest, with
+  `wisp-1.1.0.vsix` attached (clean build, 1408 files / 2.37 MB). Tag `v1.1.0` → `568942c`.
+- **Version bump** — `package.json` 1.0.0 → 1.1.0; added `repository` field + `AI`/`Chat` categories;
+  description reframed to the router positioning. `CHANGELOG.md` has the 1.1.0 entry.
+- **README rewritten** — router-first (drafted by a 4-agent panel workflow, then synthesized). Removed the
+  stale ghost-text Completion / `enabled` / `debounce` docs. Leads with "route your own models into the
+  Copilot harness"; Inquire is documented as secondary.
+- **Packaging hygiene** — `.vscodeignore` now excludes `.claude/**` and `docs/**` (a stray scheduler lock
+  + internal spec were being swept into the vsix).
+- **Merged this session:** PR #17 (the #12–#15 batch → main), PR #18 (release prep), PR #19 (vsix hygiene).
+  All Codex/Zen-Go issues (#11–#15) CLOSED.
+- **In flight:** nothing.
+- **Blocked:** **Marketplace publish** — needs a real `publisher` (currently `local`) + an Azure DevOps PAT.
+  Cannot be done without the user's credentials (see Pick up).
 
 ## Pick up here
-The **#11 batch is done**. Next action is **shipping `feat/codex-tracer`** (open the PR / merge — run
-`/preset ship`), not more feature code. If instead starting a NEW line of work, there is no pending slice —
-pick a new PRD/idea (`/preset init`) or address an open question below.
+No pending feature slice. Options:
+1. **Marketplace publish (if wanted)** — set a real `publisher` in `package.json` (currently `local`,
+   `private:true`), then `vsce login <publisher>` / `vsce publish` with an Azure DevOps PAT. User must
+   create the publisher + PAT; the build is otherwise release-ready.
+2. **New work** — `/preset init` for a brand-new feature, or address an open question below.
 
 ## Skills for next session
-- `/preset ship` — push `feat/codex-tracer` and open the PR composed from the diff.
 - `/preset init` — only if starting a brand-new feature (no slice is pending).
 
 ## Open questions
-- **Codex `id` field on replayed `function_call` items:** Wisp sends **`call_id` only** (the documented
-  stateless Responses contract); XETH-7 also sends a derived `id` (`fc_…`). The #15 F5 round-trip
-  **succeeded with call_id-only**, so the extra `id` is unnecessary here — but if a future multi-turn agent
-  flow 400s on the round-trip, adding `id` to the `function_call` item in `buildCodexResponsesBody` is the
-  fix (one line + one test). See [[gotchas]].
-- Codex `reasoning` effort is a fixed `medium` for gpt-5/o models. Make it per-model only if one needs
-  `high` / rejects `medium`. Not yet observed.
-- `codexModelCaps` vision is blanket-`true` for all codex ids. Gate per-model only if a specific `*-codex`
-  id 400s on an image. Not yet observed.
+- **Codex `id` field on replayed `function_call` items:** Wisp sends `call_id` only (F5-proven sufficient).
+  If a future multi-turn agent flow 400s on the round-trip, add a derived `id` (`fc_…`) in
+  `buildCodexResponsesBody` (one line + one test). See [[gotchas]].
+- Codex `reasoning` effort fixed at `medium` for gpt-5/o; make per-model only if one needs `high`.
+- `codexModelCaps` vision is blanket-`true`; gate per-model only if a specific id 400s on an image.
 
 ## Recent context
-- **#15 F5 (this session):** "read the files in this directory" → Codex emitted 5 `Read` tool calls in one
-  turn (parallel), VS Code ran them, results round-tripped, the model summarized the real contents. This
-  both proves the agent loop and resolves the call_id-only question above (no 400).
-- **The honesty arc across #14→#15:** #14 advertised `toolCalling:true` for *picker visibility* while
-  tools were ignored (answered as text) — a bounded honesty gap. #15 forwards the tools, closing it; the
-  flag is now fully honest.
+- **Repositioning is a product-direction call (this session):** v1.1.0's README/description/overview now
+  lead with the router-for-Copilot-harness framing. Inquire was NOT removed — only demoted to secondary.
+  See [[decisions]] 2026-06-19 v1.1.0 entry.
+- **Local artifact:** `wisp-1.1.0.vsix` sits untracked in the working dir (build output). `CLAUDE.md` has
+  pre-existing uncommitted edits (not part of any session change).
 
 ## Related
 - [[overview]]
