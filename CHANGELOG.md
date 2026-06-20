@@ -4,6 +4,19 @@ All notable changes to **Wisp** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-06-21
+
+Codex reasoning depth is now yours to set.
+
+### Added
+
+- **Codex Effort control.** A side-panel **Effort** knob (`low` / `medium` / `high` /
+  `xhigh`) for the Codex provider sets the reasoning depth for **every** Codex call —
+  Inquire and native chat alike — replacing the fixed `medium`. One global value, set it
+  once. The active depth is mirrored in the model picker (`Codex — gpt-5.3-codex · high`)
+  for reasoning-capable Codex models; inert variants (`*-spark`, `gpt-4.x`) show no depth.
+  (Issue #23)
+
 ## [1.1.0] — 2026-06-19
 
 Wisp grows into a **model router for VS Code's Copilot chat harness**: bring your own

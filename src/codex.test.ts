@@ -295,6 +295,20 @@ describe('codexReasoning', () => {
     expect(codexReasoning('gpt-4.1')).toBeUndefined();
     expect(codexReasoning('gpt-5.3-codex-spark')).toBeUndefined();
   });
+
+  // The panel-chosen Effort rides through to the reasoning object for reasoning models.
+  it('threads the supplied Effort through for reasoning models', () => {
+    expect(codexReasoning('gpt-5.4', 'high')).toEqual({ effort: 'high', summary: 'auto' });
+    expect(codexReasoning('gpt-5.5', 'xhigh')).toEqual({ effort: 'xhigh', summary: 'auto' });
+    expect(codexReasoning('o3', 'low')).toEqual({ effort: 'low', summary: 'auto' });
+    expect(codexReasoning('gpt-5.3-codex')).toEqual({ effort: 'medium', summary: 'auto' }); // default
+  });
+
+  // Effort is inert for the non-reasoning variants — they reject reasoning whatever the value.
+  it('still omits reasoning for spark / gpt-4.x regardless of Effort', () => {
+    expect(codexReasoning('gpt-4.1', 'high')).toBeUndefined();
+    expect(codexReasoning('gpt-5.3-codex-spark', 'low')).toBeUndefined();
+  });
 });
 
 describe('codexModelCaps', () => {

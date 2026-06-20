@@ -21,8 +21,8 @@ import OpenAI from 'openai';
 import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvider';
 import {
   Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, resolveKeyId, planLegacyMigration, planZenToGoMigration,
-  buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines, isCodexProvider, isCodexSignedIn, CODEX_MODELS,
-  type CodexCreds,
+  buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines, isCodexProvider, isCodexSignedIn, CODEX_MODELS, DEFAULT_EFFORT,
+  type CodexCreds, type CodexEffort,
 } from './catalog';
 import { registerWispChatProvider } from './chatProvider';
 import { CodexAuth } from './codexAuth';
@@ -84,6 +84,8 @@ const PROVIDERS: Provider[] = [
 
 // globalState key for the per-Provider model memory: { providerId: model }.
 const MODEL_MAP_KEY = 'wisp.models';
+// globalState key for the Codex reasoning Effort — one global value (not per-model), same store as models.
+const EFFORT_KEY = 'wisp.effort';
 
 // ----------------------------- Module state ----------------------------- //
 
@@ -138,6 +140,10 @@ const keySlotFor = (p: Provider): string => keySlot(resolveKeyId(p));
 // keeps its own model — one global id is wrong across Providers (Zen minimax-m3 vs Groq llama-…).
 const activeModel = (): string =>
   resolveModel(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}, activeProvider());
+
+// The Codex reasoning Effort — one global value (globalState), defaulting to medium so existing
+// behavior is unchanged. Codex-only; ignored by every keyed Provider.
+const activeEffort = (): CodexEffort => globalState.get<CodexEffort>(EFFORT_KEY) ?? DEFAULT_EFFORT;
 
 // Base URL for the Active Provider. Built-ins use their hardcoded catalog URL; only Custom reads the
 // user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
@@ -245,6 +251,14 @@ const setModel = async (id: string): Promise<void> => {
   await cfg().update('model', id, targetFor('model'));
 };
 
+// Persist the Codex reasoning Effort (one global value in globalState). Unlike setModel — which mirrors
+// into wisp.model and rides the config-change listener back to the panel — a globalState write fires NO
+// config event, so re-push the panel state explicitly or the select would not reflect the change.
+const setEffort = async (effort: CodexEffort): Promise<void> => {
+  await globalState.update(EFFORT_KEY, effort);
+  void panel?.postState();
+};
+
 // Keep wisp.model honestly reflecting the Active Provider's model after a raw wisp.provider edit
 // (the panel has no part in Issue 4). Guarded against a write-loop: writes only when stale.
 const mirrorActiveModel = async (): Promise<void> => {
@@ -287,6 +301,8 @@ const getState = async (): Promise<PanelState> => {
     signedIn,
     // Codex has no /models route — offer the curated list instead of a live fetch.
     modelOptions: isCodexProvider(p) ? CODEX_MODELS : undefined,
+    // Codex only: the reasoning-effort knob's current value (drives the panel's Effort select).
+    effort: isCodexProvider(p) ? activeEffort() : undefined,
   };
 };
 
@@ -540,7 +556,7 @@ const inquire = async (): Promise<void> => {
         token.onCancellationRequested(() => controller.abort());
         // Codex speaks the Responses API (its own client); every other Provider uses the OpenAI SDK.
         if (codex) {
-          reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, signal: controller.signal });
+          reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, effort: activeEffort(), signal: controller.signal });
         } else {
           const maxTokens = cfg().get<number>('maxTokens') ?? 0;
           const res = await client!.chat.completions.create(
@@ -644,6 +660,7 @@ export const activate = (context: vscode.ExtensionContext): void => {
     setBaseUrl,
     codexSignIn,
     codexSignOut,
+    setEffort,
   });
 
   context.subscriptions.push(
@@ -674,6 +691,8 @@ export const activate = (context: vscode.ExtensionContext): void => {
       // refreshed OAuth bundle for the streaming Responses call.
       codexSignedIn: () => codexAuth.isSignedIn(),
       codexCreds: () => codexAuth.current(),
+      // The Codex reasoning Effort governs the chat path too — one source of truth with Inquire.
+      codexEffort: () => activeEffort(),
       log: (m) => output.appendLine(m),
     }),
     // Keep derived state in sync when settings change out from under us.

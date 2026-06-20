@@ -64,6 +64,17 @@ credentialed by sign-in, not a key. Whether the user is **signed in** (not
 whether a key is set) is what makes it usable. _Avoid_: calling it an API-key
 Provider, or implying it uses Wisp's own account — it is the user's subscription.
 
+**Effort** (reasoning effort):
+How hard a **Codex Provider** model thinks — `low` / `medium` / `high` / `xhigh`,
+sent as the Codex `reasoning.effort`. One value scoped to the **Codex Provider** (not
+per-model), set in the **side panel** and mirrored in VS Code's model-picker
+label. Governs **every** Codex call — both **Inquire** and the chat/picker path
+— so it is the Provider's reasoning depth, not a per-surface setting. Inert for
+Codex's non-reasoning models (`spark`, `gpt-4.x`), which reject reasoning.
+_Avoid_: confusing Effort (reasoning depth, the user's to set) with GitHub
+Copilot's **request multiplier** (the `·3x` billing weight shown on GitHub's
+*own* models — Wisp neither sets nor sees it).
+
 **OpenCode Go** / **OpenCode Zen**:
 Two distinct **Providers** from the vendor *OpenCode*, told apart by endpoint.
 **OpenCode Go** is the **default** and first catalog entry — the OpenAI-compatible
@@ -103,7 +114,7 @@ The side-panel-surface indicator. Shows the **Activity** directly as two states 
 ### How code is edited — Inquire
 
 **Inquire**:
-Wisp's single feature — an AI inline **edit**. The user invokes Inquire
+Wisp's inline-edit feature (alongside the Copilot-harness model router) — an AI inline **edit**. The user invokes Inquire
 (`Ctrl+Shift+I`, the editor right-click menu, or the command palette), types a
 natural-language **instruction**, and Wisp rewrites the **target span** to satisfy
 it. The result is shown as a confirmable diff (VS Code's native refactor-preview)

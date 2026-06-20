@@ -16,13 +16,13 @@
  *     picker streams text and agent mode invokes the tools).
  */
 
-import { CodexCreds, buildCodexResponsesBody, codexReasoning, parseSseBlock, reduceResponsesTextEvents, reduceResponsesToolCalls, extractResponsesText, type CodexResponsesEvent, type CodexResponsesTool, type AssembledToolCall } from './catalog';
+import { CodexCreds, buildCodexResponsesBody, codexReasoning, parseSseBlock, reduceResponsesTextEvents, reduceResponsesToolCalls, extractResponsesText, type CodexEffort, type CodexResponsesEvent, type CodexResponsesTool, type AssembledToolCall } from './catalog';
 
 // A conversation message for the Codex backend: Inquire sends system+user, native chat sends user/assistant
 // — optionally with images and, in agent mode, the tool calls it made / the tool results it carries.
 type CodexMessage = { role: 'system' | 'user' | 'assistant'; content: string; images?: { mimeType: string; dataBase64: string }[]; toolCalls?: { id: string; name: string; argsJson: string }[]; toolResults?: { callId: string; content: string }[] };
 
-type CodexRequestArgs = { creds: CodexCreds; baseUrl: string; model: string; messages: CodexMessage[]; tools?: CodexResponsesTool[]; toolChoice?: 'auto' | 'required'; signal?: AbortSignal };
+type CodexRequestArgs = { creds: CodexCreds; baseUrl: string; model: string; messages: CodexMessage[]; effort?: CodexEffort; tools?: CodexResponsesTool[]; toolChoice?: 'auto' | 'required'; signal?: AbortSignal };
 
 // What codexStream yields: an answer-text fragment, or a fully-assembled tool call (emitted once the stream
 // ends). The native-chat consumer maps these to LanguageModelTextPart / LanguageModelToolCallPart.
@@ -55,7 +55,7 @@ const codexResponsesRequest = async (args: CodexRequestArgs): Promise<Response> 
   const res = await fetch(`${args.baseUrl}/responses`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(buildCodexResponsesBody({ model: args.model, messages: args.messages, reasoning: codexReasoning(args.model), tools: args.tools, toolChoice: args.toolChoice })),
+    body: JSON.stringify(buildCodexResponsesBody({ model: args.model, messages: args.messages, reasoning: codexReasoning(args.model, args.effort), tools: args.tools, toolChoice: args.toolChoice })),
     signal: args.signal,
   });
   if (!res.ok) {

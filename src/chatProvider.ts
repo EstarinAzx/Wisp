@@ -28,7 +28,7 @@ import OpenAI from 'openai';
 import {
   Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
   buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, toCodexResponsesTools, isCodexProvider, codexModelCaps,
-  type NormalizedTurn, type ToolCallDelta, type CodexCreds,
+  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort,
 } from './catalog';
 import { codexStream } from './codexClient';
 import { getModelsDevCatalog } from './modelsDev';
@@ -47,6 +47,7 @@ export type ChatProviderDeps = {
   // (so a not-signed-in Codex stays hidden) and its refreshed OAuth creds for the streaming Responses call.
   codexSignedIn: () => Promise<boolean>;
   codexCreds: () => Promise<CodexCreds | undefined>;
+  codexEffort: () => CodexEffort;                   // the panel's Codex reasoning Effort (same value Inquire uses)
   log: (message: string) => void;
 };
 
@@ -116,6 +117,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       modelMap: deps.modelMap(),
       customBaseUrl: deps.customBaseUrl(),
       caps,
+      effort: deps.codexEffort(),
     });
   },
 
@@ -140,7 +142,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       const tools = toCodexResponsesTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
       const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
       try {
-        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), tools, toolChoice, signal: controller.signal })) {
+        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), effort: deps.codexEffort(), tools, toolChoice, signal: controller.signal })) {
           if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
           // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
           let input: object = {};

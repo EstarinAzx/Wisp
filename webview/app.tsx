@@ -11,7 +11,7 @@
  *   - InMsg: state{state} | models{ids} | modelsError{message} | activity{thinking} — everything
  *     the extension sends. activity carries the live Thinking/Idle state, separate from state.
  *   - Outbound: ready | setApiKey{value} | clearApiKey | selectModel{value} | selectProvider{value}
- *     | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut.
+ *     | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut | selectEffort{value}.
  */
 
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -30,6 +30,7 @@ type State = {
   kind?: 'openai-chat' | 'codex';
   signedIn?: boolean;
   modelOptions?: string[];
+  effort?: 'low' | 'medium' | 'high' | 'xhigh';
 };
 
 type InMsg =
@@ -269,6 +270,29 @@ export const App = () => {
         />
         {modelsError && <p class="text-[var(--vscode-errorForeground)]">{modelsError}</p>}
       </section>
+
+      {/* ------------------------------ Effort (Codex only) ------------------------------ */}
+      {/* Reasoning depth for the Codex Provider — one value governing every Codex call (Inquire + chat).
+          Inert for non-reasoning Codex models (spark / gpt-4.x), which ignore it. */}
+      {state.kind === 'codex' && (
+        <section class="flex flex-col gap-1.5">
+          <h2 class="section-title">Effort</h2>
+          <select
+            class="input"
+            value={state.effort ?? 'medium'}
+            onChange={(e) => {
+              const value = e.currentTarget.value as 'low' | 'medium' | 'high' | 'xhigh';
+              setState({ ...state, effort: value }); // optimistic; the state push confirms
+              vscode.postMessage({ type: 'selectEffort', value });
+            }}
+          >
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
+        </section>
+      )}
 
       <footer class="text-xs text-[var(--vscode-descriptionForeground)] break-all">
         {state.baseUrl}

@@ -1,7 +1,7 @@
 ---
 type: decisions
 project: wisp
-updated: 2026-06-19
+updated: 2026-06-21
 tags: [context, decisions]
 ---
 
@@ -610,6 +610,57 @@ publish needs a registered publisher + an Azure DevOps PAT (user-supplied) — `
 **Reversibility:** the version/release/tag are permanent records (don't rewrite history). The *framing* is
 soft — Inquire is intact, so re-emphasizing it later is just docs. Don't, however, re-describe the product
 as "Inquire-first" in shipped docs without re-deciding; v1.1.0 chose router-first.
+
+---
+
+## 2026-06-20 — Codex Effort control (PRD #23)
+**Decision:** Add a side-panel **Effort** knob (`low`/`medium`/`high`) for the **Codex Provider**, replacing
+the hardcoded `medium` in `codexReasoning`. **One global** value (not per-model), governing **every** Codex
+call — Inquire *and* chat — and mirrored in the model-picker label (`Codex — gpt-5 · High`). Codex-only
+tracer; other Provider kinds deferred. Scoped as PRD #23 → slice #24 (knob + behavior, unblocked) and
+slice #25 (picker label, blocked by #24).
+**Why:** the effort plumbing already half-existed for Codex (just hardcoded), so the tracer is small and
+honest there. Global + provider-wide is *less* code than a per-model or per-surface split and matches "set
+it once." Explicitly **not** replicating Copilot's `·3x` request multiplier — that is GitHub's billing weight
+on its *own* models and has no BYOK equivalent; only the Effort label is reproduced. Term defined in
+`CONTEXT.md`. The prior open question ("Codex reasoning effort fixed at `medium`; make per-model if one needs
+`high`") is superseded — it becomes user-settable here.
+**Reversibility:** easy — per-model / cross-provider / per-surface are additive refinements, not rewrites.
+
+## 2026-06-21 — Codex Effort built (slice #24); scale widened to include `xhigh`
+**Decision:** Shipped the side-panel Effort knob per PRD #23. `codexReasoning(model)` →
+`codexReasoning(model, effort)` (default `medium`); new `CodexEffort` type + `DEFAULT_EFFORT`. One global
+value in **globalState `wisp.effort`** (read `activeEffort()`, write `setEffort()`), threaded to BOTH
+surfaces through the single `codexResponsesRequest` chokepoint (`codexClient.ts`) — Inquire via
+`codexInquire`, native chat via `codexStream` + `deps.codexEffort()`. Panel: `PanelState.effort` +
+`selectEffort` message + `setEffort` host action + a Codex-gated `<select>`. **Effort scale widened
+`low`/`medium`/`high` → +`xhigh`** (Codex codex-max models accept it; the user flagged it) — one literal
+union across `catalog.ts`/`sidePanelProvider.ts`/`webview/app.tsx`. `CONTEXT.md` Effort term updated and the
+stale "Inquire is Wisp's single feature" line corrected. `npm test` 139/139, tsc+webview+vite clean, F5
+PASSED (knob Codex-only; message sent on a selected effort).
+**Why:** the effort plumbing already half-existed (hardcoded `medium`), so one chokepoint makes both
+surfaces honor a single value — "set it once." Global (not per-model/per-surface) is less code and mirrors
+the per-Provider model-memory design. The non-reasoning gating already in `codexReasoning` makes Effort
+inert for `spark`/`gpt-4.x` for free. **`setEffort` must call `panel.postState()` itself** — a globalState
+write fires no `onDidChangeConfiguration` event, unlike `setModel`'s `wisp.model` mirror (the main wiring
+trap; don't remove that line).
+**Reversibility:** easy. Per-model / per-surface / cross-provider Effort stay additive refinements (later).
+`xhigh` paired with a non-codex-max model may 400 — accepted (one global value; user's pairing call).
+
+## 2026-06-21 — Codex Effort label (slice #25); PRD #23 complete
+**Decision:** The model-picker row mirrors the active Effort: `buildChatModelInfos` appends ` · <effort>`
+to a Codex row's name, gated by `isCodexProvider(p) && codexReasoning(model)` — the **same predicate** that
+decides whether a reasoning object is sent, so an inert `spark`/`gpt-4.x` row never claims a depth and no
+non-Codex row gets a suffix. Effort threaded in as a new optional `state.effort` (fed by `deps.codexEffort()`
+at the `chatProvider` call site). Raw lowercase token (`· high`), matching the panel `<select>`. No webview
+change; no live-refresh event needed — the picker re-queries `provideLanguageModelChatInformation` on open
+(the chatProvider is stateless; confirmed no `onDidChange…` event in the finalized 1.104 API). `npm test`
+139 → 141 (+2: reasoning row gets the suffix, spark row does not), tsc+webview clean, F5 PASSED.
+**Completes PRD #23.**
+**Why:** reusing `codexReasoning`'s gate makes label-honesty == reasoning-honesty for free. The handoff
+feared the 13 existing `buildChatModelInfos` tests asserted the Codex row name — they don't (the only Codex
+test asserts `capabilities`), so the change was purely additive, no existing test changed.
+**Reversibility:** easy (additive suffix + optional `state.effort`).
 
 ## Related
 - [[overview]]
