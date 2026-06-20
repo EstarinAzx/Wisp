@@ -450,7 +450,8 @@ export const isCodexSignedIn = (creds: CodexCreds | undefined): boolean =>
 // top-level `instructions` string and the conversation is `input` message items. User/system text parts
 // are typed `input_text`; assistant (replayed prior turns) are `output_text` — the API rejects the wrong
 // type. store:false (don't persist server-side); stream:true (we reduce the SSE to text).
-export type CodexReasoning = { effort: 'low' | 'medium' | 'high'; summary: 'auto' };
+export type CodexEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type CodexReasoning = { effort: CodexEffort; summary: 'auto' };
 
 // One content part of a Responses input message: text (input_text for user/system, output_text for a
 // replayed assistant turn) or an image (input_image as a base64 data-URI / url).
@@ -568,13 +569,16 @@ export const buildCodexResponsesBody = (args: {
   };
 };
 
+// Default reasoning depth — 'medium' preserves the pre-Effort behavior for callers that don't thread one.
+export const DEFAULT_EFFORT: CodexEffort = 'medium';
+
 // The reasoning object to send for a Codex model, or undefined when it must be omitted. gpt-5 / o-series
-// are reasoning models and need it; the gpt-4.x and *-spark (fast-loop) variants reject it. Effort is a
-// fixed 'medium' — a sane Inquire default (quality without the latency of 'high').
-export const codexReasoning = (model: string): CodexReasoning | undefined => {
+// are reasoning models and need it; the gpt-4.x and *-spark (fast-loop) variants reject it. The panel's
+// Effort knob supplies the depth (low/medium/high); it is inert for the non-reasoning variants.
+export const codexReasoning = (model: string, effort: CodexEffort = DEFAULT_EFFORT): CodexReasoning | undefined => {
   const m = model.toLowerCase();
   if (m.includes('spark')) return undefined;
-  return /^(gpt-5|o3|o4)/.test(m) ? { effort: 'medium', summary: 'auto' } : undefined;
+  return /^(gpt-5|o3|o4)/.test(m) ? { effort, summary: 'auto' } : undefined;
 };
 
 // Real Codex model windows, since the backend has no /models route and these ids aren't keyed to

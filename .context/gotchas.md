@@ -1,7 +1,7 @@
 ---
 type: gotchas
 project: wisp
-updated: 2026-06-19
+updated: 2026-06-21
 tags: [context, gotchas]
 ---
 
@@ -173,6 +173,22 @@ XETH-7 *also* sends a derived `id` (`fc_…`) — unnecessary here. If a future 
 round-trip, add `id` to the `function_call` item in `buildCodexResponsesBody` (one line). The reducer
 (`reduceResponsesToolCalls`) keys streamed events by the **item id** but surfaces **call_id** as the
 round-trip id — that is what `function_call_output.call_id` must match. See [[decisions]] 2026-06-19.
+
+### Two Wisp extensions at once → "already registered" warnings + a stale panel (F5 vs installed VSIX)
+F5 launches the dev build (`EsarinAzx.wisp` — current `package.json` publisher) while an **old installed
+VSIX** (`local.wisp@1.1.0`, from before the publisher rename) is still enabled. Different extension ids but
+the **same `wisp.model` / `wisp.baseUrl` / `wisp.provider` setting keys**, so VS Code logs **"Cannot
+register 'wisp.X' — this property is already registered"** (blamed on whichever loads second), and the
+side panel you see may be the **stale installed build** — none of the new UI (e.g. the Effort knob) shows.
+Not a code bug, a dev-environment dup. Fix: **uninstall/disable the installed Wisp before F5** —
+`code --uninstall-extension local.wisp` — then stop the debug session and F5 again. Disappears once a single
+published extension id exists. (`wisp.effort` is globalState, not a contributed setting, so it never collides.)
+
+### `setEffort` (and any globalState write) fires no config event — re-push the panel yourself
+`setModel` mirrors into `wisp.model`, and the `onDidChangeConfiguration` listener re-`postState()`s the
+panel. A **globalState** write (`wisp.models`, `wisp.effort`) triggers **no** event, so a mutation that only
+touches globalState must call `panel.postState()` itself or the controlled input won't reflect the change.
+`setEffort` does exactly this. Don't remove that line, and remember it for any future globalState-backed knob.
 
 ## Related
 - [[api]]

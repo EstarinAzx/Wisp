@@ -1,60 +1,65 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-19
+updated: 2026-06-21
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-19 by Opus 4.8._
-_At commit: `main` = `568942c` (clean; v1.1.0 released)._
+_Last updated: 2026-06-21 by Opus 4.8._
+_At branch: `feat/codex-effort` — this session's commit lands **slice #24**. `main` = `ec60e62`.
+Also uncommitted on the branch: pre-existing `CLAUDE.md` edit (ecosystem-KB / handoff / trace sections —
+NOT this work) and the `.context` + `CONTEXT.md` #23-planning edits, folded into this commit._
 
 ## Current focus
-**Shipped v1.1.0 and repositioned the product.** The Codex Provider + OpenCode Zen/Go batch (PRD #11,
-slices #12–#15) is merged to `main`, **released as v1.1.0**, and Wisp is now framed primarily as a
-**BYOK model router for VS Code's Copilot chat harness** (native chat / Agent / Ctrl+I), with Inquire as
-the secondary inline-edit surface. No feature work in flight.
+**Built slice #24 — Codex Effort control (PRD #23).** A side-panel **Effort** knob for the **Codex
+Provider** replaces the hardcoded `medium` and governs **every** Codex call (Inquire + chat). One global
+value. Scale is **`low` / `medium` / `high` / `xhigh`** (xhigh added this session — Codex codex-max models
+accept it). **No code committed yet** at time of writing — `/preset wrap-up` is committing it now.
 
 ## State
-- **Released v1.1.0** — GitHub release `v1.1.0` ("Copilot-harness model router"), marked Latest, with
-  `wisp-1.1.0.vsix` attached (clean build, 1408 files / 2.37 MB). Tag `v1.1.0` → `568942c`.
-- **Version bump** — `package.json` 1.0.0 → 1.1.0; added `repository` field + `AI`/`Chat` categories;
-  description reframed to the router positioning. `CHANGELOG.md` has the 1.1.0 entry.
-- **README rewritten** — router-first (drafted by a 4-agent panel workflow, then synthesized). Removed the
-  stale ghost-text Completion / `enabled` / `debounce` docs. Leads with "route your own models into the
-  Copilot harness"; Inquire is documented as secondary.
-- **Packaging hygiene** — `.vscodeignore` now excludes `.claude/**` and `docs/**` (a stray scheduler lock
-  + internal spec were being swept into the vsix).
-- **Merged this session:** PR #17 (the #12–#15 batch → main), PR #18 (release prep), PR #19 (vsix hygiene).
-  All Codex/Zen-Go issues (#11–#15) CLOSED.
-- **In flight:** nothing.
-- **Blocked:** **Marketplace publish** — needs a real `publisher` (currently `local`) + an Azure DevOps PAT.
-  Cannot be done without the user's credentials (see Pick up).
+- **Slice #24 — DONE (uncommitted → committing this session).** `codexReasoning(model, effort)` threads the
+  Effort; new `CodexEffort` type + `DEFAULT_EFFORT='medium'`; `wisp.effort` globalState value
+  (`activeEffort`/`setEffort`); panel `<select>` (Codex-gated) → `selectEffort` → `setEffort`. Threaded to
+  both surfaces via the single `codexResponsesRequest` chokepoint. **`npm test` 139/139, tsc+webview+vite
+  clean, F5 PASSED** (knob renders Codex-only; a message sent on a selected effort).
+- **Slice #25 — "Model-picker label mirrors Effort." NOW UNBLOCKED** (#24 landed). `buildChatModelInfos`
+  (`catalog.ts:~299`, `name: \`${p.label} — ${model}\``) appends `· <Effort>` for reasoning Codex rows
+  only. No live-refresh event needed: the picker re-calls `provideLanguageModelChatInformation` on open
+  (chatProvider is stateless — confirmed no `onDidChange…` event exists; finalized 1.104 API). Test:
+  `buildChatModelInfos` (`catalog.test.ts:~267`). The 13 existing tests assert the current name format —
+  expectations for the Codex row will need the suffix.
+- **Effort is one global value** (globalState `wisp.effort`), not per-model — matches the model-memory
+  design. Inert for non-reasoning Codex models (`spark`/`gpt-4.x`) for free via `codexReasoning`'s gating.
+- **Blocked:** Marketplace publish still pending a real `publisher` + Azure DevOps PAT (user creds).
 
 ## Pick up here
-No pending feature slice. Options:
-1. **Marketplace publish (if wanted)** — set a real `publisher` in `package.json` (currently `local`,
-   `private:true`), then `vsce login <publisher>` / `vsce publish` with an Azure DevOps PAT. User must
-   create the publisher + PAT; the build is otherwise release-ready.
-2. **New work** — `/preset init` for a brand-new feature, or address an open question below.
+1. **Build Slice #25** — enter with **`/preset scope 25`**. Unblocked, AFK; verified by `buildChatModelInfos`
+   unit tests + F5. Touches `catalog.ts` (label) + `catalog.test.ts`. Webview untouched → no `dist/webview`
+   rebuild needed, but F5 to confirm the picker label.
+2. If shipping #24 (and #25 when done) instead: **`/preset ship`** for a PR on `feat/codex-effort`.
 
 ## Skills for next session
-- `/preset init` — only if starting a brand-new feature (no slice is pending).
+- `/preset scope 25` — enter the work loop on the last slice of PRD #23.
 
 ## Open questions
-- **Codex `id` field on replayed `function_call` items:** Wisp sends `call_id` only (F5-proven sufficient).
-  If a future multi-turn agent flow 400s on the round-trip, add a derived `id` (`fc_…`) in
-  `buildCodexResponsesBody` (one line + one test). See [[gotchas]].
-- Codex `reasoning` effort fixed at `medium` for gpt-5/o; make per-model only if one needs `high`.
-- `codexModelCaps` vision is blanket-`true`; gate per-model only if a specific id 400s on an image.
+- **`· <Effort>` label honesty for #25:** suffix only when the active Codex model is reasoning-capable
+  (reuse `codexReasoning`'s gate), so an inert `spark`/`gpt-4.x` row never claims a depth. Decided in PRD;
+  verify the gate reuse at scope.
+- Carried over (latent): replayed `function_call` items send `call_id` only (add a derived `fc_…` `id`
+  only if a multi-turn round-trip 400s); `codexModelCaps` vision is blanket-`true`. See [[gotchas]].
+- **`xhigh` × model pairing:** one global effort, no per-model gating — `xhigh` paired with an older
+  `gpt-5`/`o3` may 400 (only codex-max honors it). User's pairing responsibility, by design (PRD "set it once").
 
 ## Recent context
-- **Repositioning is a product-direction call (this session):** v1.1.0's README/description/overview now
-  lead with the router-for-Copilot-harness framing. Inquire was NOT removed — only demoted to secondary.
-  See [[decisions]] 2026-06-19 v1.1.0 entry.
-- **Local artifact:** `wisp-1.1.0.vsix` sits untracked in the working dir (build output). `CLAUDE.md` has
-  pre-existing uncommitted edits (not part of any session change).
+- **Dev-environment dup bit the F5:** the old installed VSIX (`local.wisp@1.1.0`) + the F5 dev build
+  (`EsarinAzx.wisp`) both contributed `wisp.*` settings → "already registered" warnings and a **stale
+  panel** (no Effort knob). Fixed by uninstalling `local.wisp` before F5. New trap in [[gotchas]].
+- **`setEffort` landmine:** a globalState write fires no config-change event (unlike `setModel`'s
+  `wisp.model` mirror), so `setEffort` calls `panel.postState()` itself. Don't remove that line.
+- **`pick-up.md` was stale** at session start (pointed at the already-shipped `feat/codex-tracer`); the
+  ship task was long done (PR #17 + v1.1.0). Rewritten by this wrap-up.
 
 ## Related
 - [[overview]]

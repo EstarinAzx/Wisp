@@ -13,7 +13,8 @@
  *   - PanelHost: the shared action helpers injected from extension.ts (store/clear key, fetch
  *     model ids, set model/provider/baseUrl, read state + Activity) — avoids a circular import.
  *   - Webview → ext messages: ready | setApiKey{value} | clearApiKey | selectModel{value}
- *     | selectProvider{value} | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut.
+ *     | selectProvider{value} | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut
+ *     | selectEffort{value}.
  *   - Ext → webview messages: state{state} | models{ids} | modelsError{message} | activity{thinking}.
  */
 
@@ -34,6 +35,7 @@ export type PanelState = {
   kind?: 'openai-chat' | 'codex'; // Codex swaps the API-key field for a sign-in/out control
   signedIn?: boolean; // Codex only: whether a Codex token bundle is present
   modelOptions?: string[]; // Codex only: curated model ids for the dropdown (no live /models route)
+  effort?: 'low' | 'medium' | 'high' | 'xhigh'; // Codex only: the reasoning-effort knob (governs every Codex call)
 };
 
 // Shared with extension.ts so the no-key failure is recognizable as webview-safe text.
@@ -50,6 +52,7 @@ export type PanelHost = {
   setBaseUrl: (url: string) => Promise<void>;
   codexSignIn: () => Promise<void>;
   codexSignOut: () => Promise<void>;
+  setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh') => Promise<void>;
 };
 
 // ----------------------------- Error sanitizing ----------------------------- //
@@ -139,6 +142,10 @@ export class WispPanelProvider implements vscode.WebviewViewProvider {
           return;
         case 'codexSignOut':
           await this.host.codexSignOut();
+          return;
+        case 'selectEffort':
+          // Constrain to the valid depths so a malformed message can't write a junk value.
+          if (msg.value === 'low' || msg.value === 'medium' || msg.value === 'high' || msg.value === 'xhigh') await this.host.setEffort(msg.value);
           return;
       }
     } catch (err) {
