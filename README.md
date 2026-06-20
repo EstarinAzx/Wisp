@@ -1,12 +1,17 @@
 # Wisp
 
-**A model router for VS Code's GitHub Copilot chat harness.** Bring your own key — or your own ChatGPT account — and run Copilot's Chat, Agent, and inline-edit UI with non-Copilot models.
+**Run your ChatGPT subscription as a model inside VS Code's GitHub Copilot chat.** Sign in with your ChatGPT account and OpenAI's **Codex** models answer right in the native **Chat view**, **Agent mode**, and the **`Ctrl+I`** picker — on your own subscription, no API key.
 
-Wisp registers **your own** model backends as selectable models inside VS Code's native **Chat view**, **Agent mode**, and the **`Ctrl+I` inline-chat picker** — the same harness GitHub Copilot Chat drives. It does this through the finalized `languageModelChatProviders` extension API (vendor `wisp`, finalized in VS Code 1.104 — a stable API, **not** a proposed one, so the extension is publishable and works in stock VS Code).
+This is the one thing VS Code's built-in "add a custom model" option **can't** do: it authenticates with a static API key, so it can reach an OpenAI-compatible endpoint but never an **OAuth subscription login**. Wisp can — that's its reason to exist next to Copilot.
 
-Net effect: you can run Copilot's chat / agent / edit experience with models from your own API keys, or even your ChatGPT subscription via Codex — instead of (or alongside) Copilot's built-in models.
+Wisp is a **BYOK model router** for the Copilot harness, registering your own backends as selectable models through the finalized `languageModelChatProviders` extension API (vendor `wisp`, stable in VS Code 1.104 — **not** a proposed API, so it works in stock VS Code and is publishable). Two kinds of backend:
 
-- **Version:** 1.1.0
+- **Your ChatGPT (Codex) subscription, via OAuth** — *the differentiator.* No key; runs Codex on your own ChatGPT plan through the Responses API. Native custom-endpoint BYOK can't reach this.
+- **Any OpenAI-compatible API key** — OpenAI, Groq, Mistral, OpenRouter, OpenCode, a local Ollama box, or any Custom base URL.
+
+Net: run Copilot's chat / agent / edit experience on the model access you already pay for — above all, your ChatGPT subscription.
+
+- **Version:** 1.2.0
 - **Requires:** VS Code 1.104+
 - **Repo:** [github.com/EstarinAzx/Wisp](https://github.com/EstarinAzx/Wisp)
 - **Not on the Marketplace** — install from a `.vsix` release or from source (see [Install](#install)).
@@ -28,10 +33,10 @@ Net effect: you can run Copilot's chat / agent / edit experience with models fro
 
 ## Why route your own models?
 
-You already have model access you're paying for — a Groq key, an OpenAI key, a ChatGPT subscription, an Ollama box on your LAN. VS Code's chat/agent/edit UI is excellent, but it's wired to Copilot's catalog. Wisp closes that gap by making your backends *first-class citizens* of that same UI:
+You already have model access you're paying for — a ChatGPT subscription, a Groq or OpenAI key, an Ollama box on your LAN. VS Code's chat/agent/edit UI is excellent, and its built-in BYOK can already add an API-key endpoint — but it stops at a *static key*, so your **ChatGPT subscription** can't get in. Wisp makes all of your backends *first-class citizens* of that UI, subscription included:
 
+- **Your ChatGPT (Codex) subscription, in Chat, Agent, and Edit.** Sign in with your ChatGPT account and run OpenAI's Codex models through the Responses API — streaming, tool calling, vision, no API key. This is the part native BYOK can't do.
 - **Agent mode on your own Groq or OpenAI key.** Switch to Agent mode, pick a Wisp-routed model, and let it call tools and edit files — billed to your key, not a Copilot seat.
-- **Edit mode driven by your ChatGPT (Codex) subscription.** Sign in with your ChatGPT account and run OpenAI's Codex models through the Responses API. No API key required.
 - **A local Ollama model in chat.** Point Wisp at Ollama on `localhost` (no key), pick it in the chat picker, and keep your prompts and code entirely on-device.
 - **Mix and match.** Every usable provider shows up as its own model row alongside Copilot's. Choose per-conversation which one answers.
 
