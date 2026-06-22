@@ -35,7 +35,8 @@ export type PanelState = {
   kind?: 'openai-chat' | 'codex' | 'anthropic-oauth'; // the OAuth kinds swap the API-key field for sign-in/out
   signedIn?: boolean; // OAuth kinds only: whether a token bundle is present
   modelOptions?: string[]; // OAuth kinds only: curated model ids for the dropdown (no live /models route)
-  effort?: 'low' | 'medium' | 'high' | 'xhigh'; // Codex only: the reasoning-effort knob (governs every Codex call)
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; // Codex + Anthropic: the reasoning-effort knob (governs every call)
+  effortOptions?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]; // per-model option list — host-computed so 'max' only shows for max-capable Claude (#32)
 };
 
 // Shared with extension.ts so the no-key failure is recognizable as webview-safe text.
@@ -54,7 +55,7 @@ export type PanelHost = {
   codexSignOut: () => Promise<void>;
   anthropicSignIn: () => Promise<void>;
   anthropicSignOut: () => Promise<void>;
-  setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh') => Promise<void>;
+  setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max') => Promise<void>;
 };
 
 // ----------------------------- Error sanitizing ----------------------------- //
@@ -152,8 +153,8 @@ export class WispPanelProvider implements vscode.WebviewViewProvider {
           await this.host.anthropicSignOut();
           return;
         case 'selectEffort':
-          // Constrain to the valid depths so a malformed message can't write a junk value.
-          if (msg.value === 'low' || msg.value === 'medium' || msg.value === 'high' || msg.value === 'xhigh') await this.host.setEffort(msg.value);
+          // Constrain to the valid depths so a malformed message can't write a junk value ('max' added #32).
+          if (msg.value === 'low' || msg.value === 'medium' || msg.value === 'high' || msg.value === 'xhigh' || msg.value === 'max') await this.host.setEffort(msg.value);
           return;
       }
     } catch (err) {

@@ -30,7 +30,8 @@ type State = {
   kind?: 'openai-chat' | 'codex' | 'anthropic-oauth';
   signedIn?: boolean;
   modelOptions?: string[];
-  effort?: 'low' | 'medium' | 'high' | 'xhigh';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  effortOptions?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]; // host-computed; 'max' only for max-capable Claude (#32)
 };
 
 type InMsg =
@@ -282,25 +283,27 @@ export const App = () => {
         {modelsError && <p class="text-[var(--vscode-errorForeground)]">{modelsError}</p>}
       </section>
 
-      {/* ------------------------------ Effort (Codex only) ------------------------------ */}
-      {/* Reasoning depth for the Codex Provider — one value governing every Codex call (Inquire + chat).
-          Inert for non-reasoning Codex models (spark / gpt-4.x), which ignore it. */}
-      {state.kind === 'codex' && (
+      {/* ------------------------------ Effort ------------------------------ */}
+      {/* Reasoning depth for the effort-aware OAuth Providers — Codex and Anthropic (#31) — one value
+          governing every call (Inquire + chat). Shown whenever the host populates effort; inert for
+          models that ignore it (Codex spark/gpt-4.x, Claude Haiku). */}
+      {state.effort !== undefined && (
         <section class="flex flex-col gap-1.5">
           <h2 class="section-title">Effort</h2>
           <select
             class="input"
             value={state.effort ?? 'medium'}
             onChange={(e) => {
-              const value = e.currentTarget.value as 'low' | 'medium' | 'high' | 'xhigh';
+              const value = e.currentTarget.value as 'low' | 'medium' | 'high' | 'xhigh' | 'max';
               setState({ ...state, effort: value }); // optimistic; the state push confirms
               vscode.postMessage({ type: 'selectEffort', value });
             }}
           >
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
+            {/* Options come from the host so 'max' shows only for max-capable Claude (#32) — no capability
+                regex duplicated in this bundle. Fall back to the base set if the host omitted them. */}
+            {(state.effortOptions ?? ['low', 'medium', 'high', 'xhigh']).map((o) => (
+              <option value={o}>{o}</option>
+            ))}
           </select>
         </section>
       )}

@@ -828,6 +828,52 @@ seam — a vscode-importing non-pure module deliberately kept out of the pure un
 don't "simplify" Anthropic tools toward the Codex/strict shape, or the backend rejects them. Images stay deferred
 (own follow-up). Reference: openclaude `src/utils/api.ts`, `src/services/api/claude.ts`, `src/utils/messages.ts`.
 
+---
+
+## 2026-06-23 — Anthropic thinking/effort parity (slice "#31", branch `feat/anthropic-thinking-effort`)
+
+Claude chat/Inquire now honor the shared `wisp.effort` knob. The wire contract (extracted from openclaude, the
+reference subscription client — `src/utils/effort.ts`, `src/services/api/claude.ts`, `src/constants/betas.ts`):
+
+1. **Effort rides `output_config.effort`** (a string `low|medium|high|xhigh`), NOT a top-level `effort` and NOT
+   `thinking.budget_tokens` (the latter 400s on Opus 4.7+). The original plan note missed the nesting.
+2. **The `effort-2025-11-24` beta header is load-bearing** — without it the backend silently drops
+   `output_config.effort`. Added to `ANTHROPIC_BETA` (now `claude-code-20250219,oauth-2025-04-20,effort-2025-11-24`).
+   The note missed this entirely.
+3. **Thinking is `{type:'adaptive'}`** (no budget) for adaptive-capable models. Coupled with effort in
+   `anthropicThinkingEffort` deliberately: the wired path always passes a non-undefined effort (`activeEffort()`
+   defaults `medium`), and the coupling keeps the pre-#31 body byte-identical when no effort is threaded.
+4. **Model-gated:** effort fields emitted only for `/opus-4-[5-8]/` + `sonnet-4-6` (Haiku/older 400). **`xhigh`
+   clamps to `high`** on all but Opus 4.7/4.8 (the panel offers `xhigh` for every effort-aware Provider; Sonnet
+   4.6 400s on it) — mirrors openclaude `resolveAppliedEffort`.
+5. **The effort knob is now shared** Codex+Anthropic — the `chatProvider` dep `codexEffort` → `effort`; the panel
+   Effort select is data-gated (`state.effort !== undefined`), populated for both OAuth Providers.
+
+**Probe resolved positive:** F5 confirmed the subscription OAuth path accepts the new body fields with no
+synthetic-429 (openclaude was already strong evidence; the #28 fingerprint samples first-user-message text only,
+never body fields). 9 new tests, `npm test` 196/196, tsc+webview+vite clean. Reviewed (cavecrew-reviewer): the
+`xhigh` 400 + the `[5-9]` over-match were caught pre-commit and fixed.
+
+**Deferred → issue #32:** `max` effort. Needs widening the shared effort type past `xhigh`, per-model panel
+option gating (`max` is Opus-4.6+-only), a `max→high` clamp, and cross-provider normalization (Codex maps a
+stored `max`→`xhigh`). The `xhigh` clamp in this slice is the template.
+
+## 2026-06-23 — Anthropic `max` effort + picker mirrors the first-party `/effort` slider (#32)
+**Decision:** Added the `max` level. Type = `EffortLevel = CodexEffort | 'max'` superset (not overloading
+`CodexEffort` — Codex's wire tops at `xhigh`). Wire clamp in `anthropicThinkingEffort`: `max→high` on non-max
+models (`modelSupportsAnthropicMax = /opus-4-[678]/`), beside the existing `xhigh→high`. Codex normalizes a
+stored `max→xhigh` (`standardEffortToCodex`) at every send-site. **The picker is provider-only, NOT
+model-gated** — `effortOptionsFor(provider)` shows Anthropic the full `low→max` ladder regardless of model;
+Codex stops at `xhigh`.
+**Why:** Issue #32 specified per-model `max` gating ("`max` 400s on Sonnet"). But the first-party Claude Code
+`/effort` slider exposes the full ladder for Sonnet 4.6 and clamps the *applied* value to `high` (the header
+read "Sonnet 4.6 with high effort" while the slider caret sat past `high`). Taxonomy verified against
+openclaude `src/utils/effort.ts`: `max` = Opus 4.6/4.7/4.8, `xhigh` = Opus 4.7/4.8, Sonnet 4.6 / Opus 4.5 take
+neither. So capability belongs in the wire clamp (single source of truth) and the picker just mirrors official
+— simpler than per-model option computation, and honest to what the first-party client shows. 6 new tests,
+`npm test` 204/204, tsc+webview+vite clean. Shipped with #28–#31 as release **1.3.0** to `main`.
+**Reversibility:** easy (picker list + clamp are localized to `catalog.ts`).
+
 ## Related
 - [[overview]]
 - [[oauth-recon]]
