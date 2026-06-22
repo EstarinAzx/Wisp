@@ -1,39 +1,43 @@
 ---
 type: pick-up
 project: wisp
-updated: 2026-06-22
+updated: 2026-06-23
 tags: [context, pick-up]
 ---
 
 # Pick up
 
-Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate, then
-`.context/oauth-recon.md` (the design source of truth for the work below).
+Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate, then `.context/decisions.md`
+(2026-06-23 entries) for the Anthropic tool wire contract + the #28 fingerprint contract.
 
-**Last session (2026-06-22):** Planning only, no code. Investigated openclaude's Anthropic + xAI OAuth
-(verified, written to `oauth-recon.md`) and ran the init funnel: created **PRD #27 — Anthropic OAuth
-Provider** and split it into slices **#28 → #29 → #30** on `EstarinAzx/Wisp`. Scope is **Anthropic only**;
-xAI is deferred to a future PRD (no xAI subscription). PRD #23 (Codex Effort) already shipped earlier via
-#26 + **v1.2.0** — that baton is closed.
+**Last session (2026-06-23):** Built + HITL-verified **slice #30 — Anthropic tool-calling parity (Agent mode)**.
+Claude now emits tool calls, Wisp surfaces them as VS Code LM tool calls, results round-trip as `tool_result`
+blocks, the loop completes — `toolCalling:true` is honest for Claude. **F5 PASSED** (5 parallel `Read` calls in
+one turn). New cores in `catalog.ts` (`toAnthropicTools`, `reduceAnthropicToolCalls`, extended
+`buildAnthropicMessagesBody`+`AnthropicMessage`, `parseToolInput`), `anthropicClient.ts` (`AnthropicStreamEvent`
+union + tool folding in `anthropicStream`), `chatProvider.ts` (Anthropic branch forwards tools, maps parts).
+17 new tests, `npm test` **187/187**, tsc+webview+vite clean. A 20-agent adversarial review found **0 code bugs**
+(3 coverage gaps → 2 tests added, 1 justified-skip). Committed on branch `feat/anthropic-oauth` (off `main`).
 
-**Next task: implement slice #28** — the Anthropic Provider **tracer** (sign in + one Inquire edit). Enter
-with **`/preset scope 28`** (restate, plan files-to-touch, go/no-go) before code. Build `src/anthropicAuth.ts`
-+ minimal `src/anthropicClient.ts` mirroring `src/codexAuth.ts` / `src/codexClient.ts`; wire
-`kind:'anthropic-oauth'` into `catalog.ts` / `extension.ts` / panel / `package.json`. Constants + flow in
-`oauth-recon.md` §1.
+**Next task: slice #31 — Anthropic thinking/effort parity.** Enter with **`/preset scope 31`**. Claude chat runs
+**thinking-OFF, effort-default** because `buildAnthropicMessagesBody` sends no `thinking`/`output_config.effort`.
+Mirror Codex's panel Effort knob: add `thinking:{type:'adaptive'}` + `output_config:{effort}` (low..max — **NOT**
+`budget_tokens`, which 400s on Opus 4.7+), threading the existing globalState `wisp.effort` (or a Claude-gated one).
+TDD the body change. **PROBE FIRST** (the blocker): confirm the subscription OAuth Messages path accepts these body
+fields without a synthetic-429. #30's tools rode that path fine — partial evidence it'll work, but verify.
 
 **Landmines / things to know:**
-- **#28 verify is HITL** — the OAuth round-trip needs your real Claude.ai account + browser; the agent loop
-  can build + unit-test but cannot confirm sign-in alone.
-- **Anthropic is NOT OpenAI-compatible** — slice #29 needs a bespoke Messages-API adapter (the Codex
-  Responses-adapter analogue), not a reused chat path. Don't budget it as "another OAuth row."
-- **No system-prompt spoof required** — openclaude proves Anthropic OAuth serves a non-"Claude Code"
-  identity; Wisp keeps its own prompt. Recognition = token + client_id + UA + `oauth-2025-04-20` beta.
-- **Dormant kill-switch:** `NATIVE_CLIENT_ATTESTATION` is a known ceiling Wisp (Node) can't reproduce —
-  unenforced today; if it activates, the Anthropic path breaks (xAI unaffected). Not a blocker.
-- **Before any F5:** uninstall `local.wisp` (old VSIX collides with the dev build — stale panel). See [[gotchas]].
-- **`CLAUDE.md` still uncommitted** (pre-existing ecosystem-KB/handoff/trace edit, unrelated) — decide
-  separately.
+- **The #28 fingerprint contract is load-bearing** — any new body field must NOT change how `firstUserMessage` is
+  sampled (first non-system turn's TEXT). #31's `thinking`/`effort` are the next fields to ride it; the fingerprint
+  itself only hashes first-user-message text, so the risk is backend *validation* of the new fields, not the hash.
+- **Anthropic ≠ Codex wire format** (see [[decisions]] 2026-06-23 #30): no strict schema, object `tool_choice`,
+  sibling `tool_use` blocks, parsed `input`, index-keyed streaming. Don't "simplify" toward the Codex shape.
+- **Images still deferred** for Anthropic chat — own follow-up, not #31.
+- **Subscription 1M ceiling** still unverified — separate small probe (drop opus/sonnet `contextInput` if it 4xx/413s).
+- **`CLAUDE.md` still uncommitted** (pre-existing, unrelated) — decide separately.
+- **Before any F5:** uninstall `local.wisp` (stale-panel collision). See [[gotchas]].
+- **Not yet shipped:** branch `feat/anthropic-oauth` has #28/#29/#30 committed but no PR for #30 yet — run
+  `/preset ship` to push + open the PR.
 
-Full state in [[active-work]]; the verified design in [[oauth-recon]]; settled choices in [[decisions]]
-(2026-06-22 entry); traps in [[gotchas]]; domain language in `CONTEXT.md`.
+Full state in [[active-work]]; the verified design in [[oauth-recon]]; the request/tool/caps contracts in
+[[decisions]] (2026-06-23); traps in [[gotchas]]; domain language in `CONTEXT.md`.

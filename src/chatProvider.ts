@@ -28,9 +28,11 @@ import OpenAI from 'openai';
 import {
   Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
   buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, toCodexResponsesTools, isCodexProvider, codexModelCaps,
-  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort,
+  isAnthropicProvider, anthropicModelCaps, toAnthropicTools,
+  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort, type AnthropicCreds,
 } from './catalog';
 import { codexStream } from './codexClient';
+import { anthropicStream } from './anthropicClient';
 import { getModelsDevCatalog } from './modelsDev';
 
 // ----------------------------- Dependencies ----------------------------- //
@@ -48,6 +50,10 @@ export type ChatProviderDeps = {
   codexSignedIn: () => Promise<boolean>;
   codexCreds: () => Promise<CodexCreds | undefined>;
   codexEffort: () => CodexEffort;                   // the panel's Codex reasoning Effort (same value Inquire uses)
+  // Anthropic is the same "usable when signed in" shape as Codex (no API key): the signed-in flag gates
+  // the row, current() returns the refreshed OAuth bundle for the streaming Messages call.
+  anthropicSignedIn: () => Promise<boolean>;
+  anthropicCreds: () => Promise<AnthropicCreds | undefined>;
   log: (message: string) => void;
 };
 
@@ -87,6 +93,12 @@ const toCodexMessages = (messages: readonly vscode.LanguageModelChatRequestMessa
   messages.map(normalizeTurn)
     .map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
+// Native chat turns → Anthropic Messages turns: role, text, and the agent round-trip — the tool calls a
+// turn made and the tool results it carries (#30). buildAnthropicMessagesBody expands those into tool_use /
+// tool_result content blocks. Images are still dropped here (a separate follow-up, not #30's scope).
+const toAnthropicMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
+  messages.map(normalizeTurn).map((t) => ({ role: t.role, content: t.text, toolCalls: t.toolCalls, toolResults: t.toolResults }));
+
 // ----------------------------- Provider ----------------------------- //
 
 // Implements the three LanguageModelChatProvider methods over Wisp's catalog. The model `id` we
@@ -96,8 +108,12 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
   // every Provider first, then hand the plain facts to the pure builder, which owns the usability rules.
   provideLanguageModelChatInformation: async () => {
     const keyedPairs = await Promise.all(
-      // Codex usability is "signed in" (no API key); every other row is "has a key".
-      deps.providers.map(async (p) => [p.id, isCodexProvider(p) ? await deps.codexSignedIn() : !!(await deps.keyFor(p))] as const),
+      // The OAuth rows (Codex, Anthropic) are usable when "signed in" (no API key); every other row is
+      // "has a key".
+      deps.providers.map(async (p) => [p.id,
+        isCodexProvider(p) ? await deps.codexSignedIn()
+          : isAnthropicProvider(p) ? await deps.anthropicSignedIn()
+            : !!(await deps.keyFor(p))] as const),
     );
     const keyed = Object.fromEntries(keyedPairs);
     // Pull the real context/output/vision from models.dev. Race a timeout so a cold/slow fetch never
@@ -107,11 +123,12 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       getModelsDevCatalog(),
       new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4000)),
     ]);
-    // Codex has no models.dev catalogKey (no /models route), so use its own real-window table; every other
-    // row pulls live caps from models.dev when it has a catalogKey.
+    // Codex and Anthropic have no models.dev catalogKey (no /models route), so each uses its own real-window
+    // table; every other row pulls live caps from models.dev when it has a catalogKey.
     const caps = (provider: Provider, model: string) =>
       isCodexProvider(provider) ? codexModelCaps(model)
-        : provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
+        : isAnthropicProvider(provider) ? anthropicModelCaps(model)
+          : provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
     return buildChatModelInfos(deps.providers, {
       keyed,
       modelMap: deps.modelMap(),
@@ -143,6 +160,31 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
       try {
         for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), effort: deps.codexEffort(), tools, toolChoice, signal: controller.signal })) {
+          if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
+          // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
+          let input: object = {};
+          try { input = ev.call.argsJson ? JSON.parse(ev.call.argsJson) : {}; } catch { /* keep {} */ }
+          progress.report(new vscode.LanguageModelToolCallPart(ev.call.id, ev.call.name, input));
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return; // user cancelled — normal, not a failure
+        deps.log(`[error] chat ${provider.id} ${String(err)}`);
+        throw err;
+      }
+      return;
+    }
+
+    // Anthropic speaks the Messages API, not chat completions — stream it through the dedicated client.
+    // Agent tools are forwarded as Anthropic tools (#30); anthropicStream yields text fragments live and the
+    // assembled tool calls at stream end, mapped to text / tool-call parts exactly like the Codex path.
+    if (isAnthropicProvider(provider)) {
+      const creds = await deps.anthropicCreds();
+      if (!creds) return; // only signed-in Anthropic is advertised — rare sign-out race
+      const baseUrl = resolveBaseUrl(provider, deps.customBaseUrl());
+      const tools = toAnthropicTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
+      const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'any' : 'auto';
+      try {
+        for await (const ev of anthropicStream({ creds, baseUrl, model: modelId, messages: toAnthropicMessages(messages), tools, toolChoice, signal: controller.signal })) {
           if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
           // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
           let input: object = {};

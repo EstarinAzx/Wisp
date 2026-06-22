@@ -1,15 +1,17 @@
 // ---------------- catalog.ts — Wisp: pure Provider-catalog data + resolvers ---------------- //
 
 /*
- * Depends on: nothing — this module is deliberately vscode-free so its logic is unit-testable
- *   without the Extension Development Host. extension.ts imports these and feeds them the values it
- *   reads from the VS Code config/state; the thin wrappers there stay behaviour-identical.
+ * Depends on: node crypto (PKCE/state generation only) — but deliberately vscode-free, so its logic
+ *   is unit-testable without the Extension Development Host. extension.ts imports these and feeds them
+ *   the values it reads from the VS Code config/state; the thin wrappers there stay behaviour-identical.
  *
  * Data shapes:
  *   - Provider: one OpenAI-chat-compatible backend = { id, label, baseUrl, defaultModel, apiKeyEnv }.
  *     id doubles as the SecretStorage key-slot and the per-Provider model-map suffix.
  *   - EditMessage: one chat message ({ role: 'system' | 'user', content }) in an Inquire edit request.
  */
+
+import { randomBytes, webcrypto, createHash } from 'crypto';
 
 // ----------------------------- Types ----------------------------- //
 
@@ -26,10 +28,11 @@ export type Provider = {
   // sibling. Defaults to the row's own id. OpenCode Zen sets keyId='opencode-go' — both are the same
   // OpenCode account (one key, two endpoints), so Zen reuses Go's stored key rather than asking twice.
   keyId?: string;
-  // Provider kind: 'openai-chat' (the default — every OpenAI-compatible chat row) or 'codex' (the
-  // subscription-backed Codex Responses backend, reached by ChatGPT OAuth, not an API key). Absent ==
-  // 'openai-chat', so the ten existing rows need no edit; the Inquire/key/usability paths branch on it.
-  kind?: 'openai-chat' | 'codex';
+  // Provider kind: 'openai-chat' (the default — every OpenAI-compatible chat row), 'codex' (the
+  // subscription-backed Codex Responses backend, reached by ChatGPT OAuth), or 'anthropic-oauth' (the
+  // subscription-backed Claude Messages backend, reached by Claude.ai OAuth). Absent == 'openai-chat',
+  // so the ten existing rows need no edit; the Inquire/key/usability paths branch on it.
+  kind?: 'openai-chat' | 'codex' | 'anthropic-oauth';
   // Note: context/vision carry no per-row hints — both come from the ACTIVE model via models.dev
   // (catalogKey), else context = neutral default and vision = the modelSupportsVision heuristic.
 };
@@ -607,6 +610,11 @@ export const CODEX_MODELS: string[] = [
 // One parsed Server-Sent Event off the Codex Responses stream: the SSE `event:` name and its `data:` JSON.
 export type CodexResponsesEvent = { event: string; data: any };
 
+// The provider-agnostic shape parseSseBlock returns — both Codex (Responses) and Anthropic (Messages)
+// stream `event:`/`data:` SSE, so the same parser feeds both reducers; the event names differ, the shape
+// does not. Aliased so the Anthropic code reads in its own vocabulary rather than "CodexResponsesEvent".
+export type SseEvent = CodexResponsesEvent;
+
 // Parse ONE SSE block (a blank-line-separated run of `event:`/`data:` lines) into an event. The data:
 // lines are joined before JSON parsing (SSE splits long payloads across lines). undefined for a block
 // with no event/data, the [DONE] sentinel, or unparseable JSON. Shared by the non-streaming reader (it
@@ -769,3 +777,225 @@ export const parseCodexAuthJson = (json: unknown): CodexCreds | undefined => {
     ...(apiKey ? { apiKey } : {}),
   };
 };
+
+// ----------------------------- Anthropic OAuth Provider (pure cores) ----------------------------- //
+
+// The credential bundle for the Anthropic Provider. Like Codex it is OAuth-backed (no API key), but the
+// token carries no JWT exp — Anthropic returns expires_in, so the deadline is computed at exchange time
+// and stored as an absolute epoch-ms expiresAt. The impure anthropicAuth.ts owns the OAuth/IO; this
+// module only reasons about an already-parsed blob.
+export type AnthropicCreds = {
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number; // epoch ms; absent when the token response carried no expires_in
+};
+
+// Whether a catalog row is the Anthropic backend. Absent kind == 'openai-chat', so this is false for the
+// ten OpenAI-compatible rows and the Codex row.
+export const isAnthropicProvider = (provider: Provider): boolean => provider.kind === 'anthropic-oauth';
+
+// Anthropic is "usable when signed in" — no API key, so usability is the presence of a bearer access
+// token. The `{}` sign-out tombstone and a refresh-only blob both read as signed-out.
+export const isAnthropicSignedIn = (creds: AnthropicCreds | undefined): boolean =>
+  !!creds && !!creds.accessToken;
+
+// Turn an Anthropic OAuth token response into AnthropicCreds. expires_in (seconds, relative) becomes an
+// absolute expiresAt against the injected clock — `now` is a parameter so this stays pure and testable.
+export const tokensToAnthropicCreds = (
+  payload: { access_token?: string; refresh_token?: string; expires_in?: number },
+  now: number,
+): AnthropicCreds => ({
+  ...(payload.access_token ? { accessToken: payload.access_token } : {}),
+  ...(payload.refresh_token ? { refreshToken: payload.refresh_token } : {}),
+  ...(typeof payload.expires_in === 'number' ? { expiresAt: now + payload.expires_in * 1000 } : {}),
+});
+
+// Refresh the access token 5 minutes BEFORE it expires, so an in-flight request can't have it die under
+// it (Anthropic's larger skew than Codex's 60s, per openclaude's isOAuthTokenExpired). No expiresAt →
+// false: we can't prove staleness, so don't force a refresh that might block a working token.
+const ANTHROPIC_TOKEN_REFRESH_SKEW_MS = 5 * 60_000;
+export const shouldRefreshAnthropicToken = (creds: { expiresAt?: number }, now: number): boolean =>
+  creds.expiresAt !== undefined && creds.expiresAt <= now + ANTHROPIC_TOKEN_REFRESH_SKEW_MS;
+
+// Parse a stored SecretStorage slot into AnthropicCreds. An absent/empty slot, or a corrupt one (bad
+// JSON), reads as undefined rather than throwing; the `{}` tombstone parses to an empty object (which
+// isAnthropicSignedIn then reads as signed-out).
+export const parseAnthropicCreds = (raw: string | undefined): AnthropicCreds | undefined => {
+  if (!raw) return undefined;
+  try { return JSON.parse(raw) as AnthropicCreds; } catch { return undefined; }
+};
+
+// Curated Claude model ids for the panel dropdown — the OAuth Messages path has no Wisp-side /models
+// listing, so this mirrors the current Claude lineup. The anthropic row's defaultModel must stay a member.
+export const ANTHROPIC_MODELS: string[] = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'];
+
+// ----------------------------- Anthropic client attestation ----------------------------- //
+
+// The subscription Messages backend recomputes + validates a per-request fingerprint and rejects an
+// unrecognized client with a synthetic 429 (no rate-limit headers). The recipe (openclaude-verified):
+// sha256(salt + chars sampled from the first user message at indices 4/7/20 + version), first 3 hex.
+// Missing indices substitute '0'. Salt/indices are load-bearing — the server checks them, so this MUST
+// be derived from the exact first-user-message text that is sent.
+const ANTHROPIC_FP_SALT = '59cf53e54c78';
+export const anthropicFingerprint = (firstUserMessage: string, version: string): string => {
+  const sampled = [4, 7, 20].map((i) => firstUserMessage[i] ?? '0').join('');
+  return createHash('sha256').update(ANTHROPIC_FP_SALT + sampled + version).digest('hex').slice(0, 3);
+};
+
+// The attribution string Claude Code sends as the FIRST system block — the recognition signal that carries
+// the validated fingerprint. No cch (native attestation can't be reproduced from Node and is unenforced),
+// no cc_workload (interactive run). version must match the User-Agent's claude-cli/<version>.
+export const anthropicAttribution = (firstUserMessage: string, version: string): string =>
+  `x-anthropic-billing-header: cc_version=${version}.${anthropicFingerprint(firstUserMessage, version)}; cc_entrypoint=cli;`;
+
+// ----------------------------- Anthropic Messages request + reply (pure cores) ----------------------------- //
+
+// One conversation message for the Messages backend. Inquire sends system+user; native chat sends
+// user/assistant. The Messages API carries the system prompt top-level (not as a role), so a 'system'
+// entry here is lifted out by the body builder rather than placed among `messages`. Agent mode (#30) also
+// carries a turn's tool round-trip: toolCalls on an assistant turn, toolResults on a user turn — kept
+// alongside `content` (the text), mirroring the Codex message shape, and expanded to content blocks below.
+export type AnthropicMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  toolCalls?: { id: string; name: string; argsJson: string }[];
+  toolResults?: { callId: string; content: string }[];
+};
+
+// An Anthropic Messages tool definition. Unlike Codex's strict Responses tools, Anthropic accepts a plain
+// JSON schema as `input_schema` — no additionalProperties:false / required-all-keys closure.
+export type AnthropicTool = { name: string; description: string; input_schema: Record<string, unknown> };
+
+// Map VS Code tool defs to Anthropic tools. The schema rides through verbatim (Anthropic doesn't require
+// strict closure), so this is far simpler than toCodexResponsesTools; a tool with no schema gets an empty
+// object schema so input_schema is always present and valid.
+export const toAnthropicTools = (tools: ToolSpec[]): AnthropicTool[] =>
+  tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: (t.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+  }));
+
+// Parse a tool call's accumulated argument JSON into the object Anthropic's tool_use block expects (Codex's
+// Responses round-trip sends the raw string; Anthropic wants it parsed). Bad/partial JSON degrades to {}.
+const parseToolInput = (argsJson: string): Record<string, unknown> => {
+  try { return argsJson ? JSON.parse(argsJson) : {}; } catch { return {}; }
+};
+
+// Translate a conversation into an Anthropic Messages request body. The system text moves to the top-level
+// `system` block array — Anthropic does NOT take a system role in `messages` — led by the Claude Code
+// attribution block (its fingerprint derived from the first user turn's TEXT, the #28 contract — so it MUST
+// stay sourced from `content`, never from a tool block). A turn with tool calls/results expands to a content
+// BLOCK array (assistant: text then tool_use; user: tool_result FIRST then text — Anthropic requires that
+// order); a plain turn stays a bare string (the #29 shape). An empty text block is never emitted (Anthropic
+// rejects it), so a tool-only turn is just its tool block. tools ride only when non-empty — a bare
+// tool_choice with no tools is rejected. Shared by anthropicInquire and anthropicStream: one tested shape.
+export const buildAnthropicMessagesBody = (args: {
+  model: string; messages: AnthropicMessage[]; maxTokens: number; version: string; stream?: boolean;
+  tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any';
+}) => {
+  const wispSystem = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const convo = args.messages.filter((m) => m.role !== 'system');
+  const firstUserMessage = convo[0]?.content ?? '';
+  const system = [
+    { type: 'text' as const, text: anthropicAttribution(firstUserMessage, args.version) },
+    ...(wispSystem ? [{ type: 'text' as const, text: wispSystem }] : []),
+  ];
+  const messages = convo.map((m) => {
+    if (m.role === 'assistant') {
+      // A plain text turn stays a bare string (the #29 shape); only a tool-call turn expands to blocks.
+      if (!m.toolCalls?.length) return { role: 'assistant' as const, content: m.content };
+      const blocks: unknown[] = [];
+      if (m.content) blocks.push({ type: 'text', text: m.content });
+      for (const tc of m.toolCalls) blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: parseToolInput(tc.argsJson) });
+      return { role: 'assistant' as const, content: blocks };
+    }
+    if (!m.toolResults?.length) return { role: 'user' as const, content: m.content };
+    // tool_result blocks lead so the assistant(tool_use) → tool_result order the API wants holds.
+    const blocks: unknown[] = [];
+    for (const tr of m.toolResults) blocks.push({ type: 'tool_result', tool_use_id: tr.callId, content: tr.content });
+    if (m.content) blocks.push({ type: 'text', text: m.content });
+    return { role: 'user' as const, content: blocks };
+  });
+  return {
+    model: args.model,
+    max_tokens: args.maxTokens,
+    system,
+    messages,
+    ...(args.stream ? { stream: true as const } : {}),
+    ...(args.tools && args.tools.length ? { tools: args.tools, tool_choice: { type: args.toolChoice ?? 'auto' } } : {}),
+  };
+};
+
+// One Anthropic Messages SSE event → its answer-text fragment, else ''. Answer text rides only on a
+// content_block_delta whose delta is a text_delta; a tool_use block's input_json_delta and every lifecycle
+// event (message_start, content_block_start/stop, ping, message_delta/stop) carry no answer text. A
+// non-string text is skipped rather than coerced into the answer.
+export const anthropicTextDelta = (ev: SseEvent): string =>
+  ev.event === 'content_block_delta' && ev.data?.delta?.type === 'text_delta' && typeof ev.data.delta.text === 'string'
+    ? ev.data.delta.text
+    : '';
+
+// Reduce a whole Messages SSE event run to its answer text — concatenate the text_delta fragments in order.
+// An `error` event is a backend failure (throw its message) rather than partial text. anthropicStream
+// yields the same per-event fragments live; this is the testable spec of that streaming semantics.
+export const reduceAnthropicTextEvents = (events: SseEvent[]): string => {
+  let text = '';
+  for (const ev of events) {
+    if (ev.event === 'error') throw new Error(ev.data?.error?.message ?? 'Anthropic response failed');
+    text += anthropicTextDelta(ev);
+  }
+  return text;
+};
+
+// Reassemble streamed Messages tool_use blocks into whole tool calls — the Anthropic analogue of
+// reduceResponsesToolCalls. A tool_use block is announced by content_block_start (carrying the toolu_ id +
+// name) and its arguments stream as content_block_delta(input_json_delta) partial_json fragments. Keyed by
+// the content-block `index` (Anthropic's per-block key — Codex keys by item id instead). The toolu_ id is the
+// round-trip id that becomes the matching tool_result's tool_use_id. Returned in first-seen order; a block
+// that never announced a name is dropped (it can't be invoked). Reuses AssembledToolCall (id/name/argsJson)
+// — a no-argument tool simply leaves argsJson '' (the consumer maps '' → {}).
+export const reduceAnthropicToolCalls = (events: SseEvent[]): AssembledToolCall[] => {
+  const byIndex = new Map<number, AssembledToolCall>();
+  for (const ev of events) {
+    if (ev.event === 'content_block_start' && ev.data?.content_block?.type === 'tool_use') {
+      const cb = ev.data.content_block;
+      const call = byIndex.get(ev.data.index) ?? { id: '', name: '', argsJson: '' };
+      if (typeof cb.id === 'string') call.id = cb.id;
+      if (typeof cb.name === 'string') call.name = cb.name;
+      byIndex.set(ev.data.index, call);
+    } else if (ev.event === 'content_block_delta' && ev.data?.delta?.type === 'input_json_delta') {
+      const call = byIndex.get(ev.data.index) ?? { id: '', name: '', argsJson: '' };
+      if (typeof ev.data.delta.partial_json === 'string') call.argsJson += ev.data.delta.partial_json;
+      byIndex.set(ev.data.index, call);
+    }
+  }
+  return [...byIndex.values()].filter((c) => c.name);
+};
+
+// Real Claude model windows — the OAuth Messages path has no models.dev catalogKey, so without this the
+// chat picker would show the neutral default. Windows are the model spec: the Opus and Sonnet 4.x family
+// is a 1M context (standard, no beta), Haiku 4.5 is 200K; Opus tops 128K output, the rest 64K. vision is
+// true (Claude is multimodal). ⚠️ These are the *model* maxes — the Claude.ai subscription Messages path
+// the OAuth token rides may cap lower than 1M; advertised as a picker budgeting hint, so an oversized
+// pack surfaces as a backend error (already handled) rather than being silently wrong.
+export const anthropicModelCaps = (model: string): ModelCaps => {
+  const m = model.toLowerCase();
+  if (m.includes('haiku')) return { contextInput: 200_000, maxOutput: 64_000, vision: true };
+  if (m.includes('opus')) return { contextInput: 1_000_000, maxOutput: 128_000, vision: true };
+  return { contextInput: 1_000_000, maxOutput: 64_000, vision: true }; // sonnet + default
+};
+
+// ----------------------------- PKCE + state (OAuth) ----------------------------- //
+
+// base64url without padding — the form OAuth PKCE + the authorize URL expect.
+export const base64url = (buf: Buffer): string =>
+  buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+// 32 random bytes as base64url (43 chars): the PKCE code_verifier and the CSRF state share this shape.
+export const codeVerifier = (): string => base64url(randomBytes(32));
+export const oauthState = (): string => base64url(randomBytes(32));
+
+// The PKCE S256 code_challenge for a verifier: base64url(SHA-256(verifier)).
+export const codeChallenge = async (verifier: string): Promise<string> =>
+  base64url(Buffer.from(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));

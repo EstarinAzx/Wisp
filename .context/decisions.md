@@ -1,7 +1,7 @@
 ---
 type: decisions
 project: wisp
-updated: 2026-06-22
+updated: 2026-06-23
 tags: [context, decisions]
 ---
 
@@ -702,6 +702,131 @@ blocker**, and xAI would be unaffected.
 Messages-adapter-required, no-sysprompt-spoof, and accepted-risk facts are load-bearing — don't "simplify"
 Anthropic into an OpenAI-compatible row, and don't re-open the ToS go/no-go without re-reading this. The
 deferred registry refactor stays open for the xAI PRD.
+
+## 2026-06-23 — Anthropic tracer built (slice #28); the live 429 resolved the recognition contract
+**Decision:** Shipped the Anthropic Provider tracer per the 2026-06-22 ADR. New pure cores in `catalog.ts`
+(TDD, `npm test` **159/159**): `Provider.kind += 'anthropic-oauth'`, `isAnthropicProvider`,
+`isAnthropicSignedIn`, `tokensToAnthropicCreds` (expires_in → absolute `expiresAt`), `shouldRefreshAnthropicToken`
+(5-min skew), `parseAnthropicCreds` (tombstone/corrupt → undefined), `ANTHROPIC_MODELS`, the shared PKCE
+generators (`base64url`/`codeVerifier`/`codeChallenge`/`oauthState`, lifted into `catalog.ts` so they're
+unit-testable — Codex keeps its private copies until the deferred extraction), and the **client attestation**
+pair `anthropicFingerprint`/`anthropicAttribution`. New impure `anthropicAuth.ts` (PKCE/loopback/SecretStorage
+`wisp.anthropicAuth`/JSON token exchange/scope-omitting refresh/`{}` tombstone) + `anthropicClient.ts`
+(non-streaming `/v1/messages`, system-as-block-array, text extract). `extension.ts` branches Inquire on
+`isAnthropicProvider`; panel generalizes the Codex sign-in block to both OAuth kinds. **F5: sign-in + one
+Inquire edit PASSED.**
+
+**The load-bearing live finding — the subscription Messages backend gates on a SERVER-VALIDATED client
+fingerprint; missing it returns a *synthetic* 429.** Sign-in worked first try, but the first inference 429'd
+with `{"type":"rate_limit_error","message":"Error"}` and — the tell — **no `anthropic-ratelimit-*` headers and
+no `retry-after`** (a real limit always carries them). Three recognition signals were required, none of which
+a bare OAuth request sent (extracted from openclaude's actual Messages code, `D:/.claude/claude projects/openclaude`):
+1. **`anthropic-beta: claude-code-20250219,oauth-2025-04-20`** — a COMMA-joined list. `claude-code-20250219`
+   is the primary "this is Claude Code" gate; **`oauth-2025-04-20` alone is NOT enough**.
+2. **User-Agent `claude-cli/0.19.0 (external, cli)`** + `x-app: cli`. NB the inference UA token is
+   **`claude-cli/`**, not `claude-code/` (that one is MCP/WebFetch only) — this **corrects** the 2026-06-22
+   ADR sub-decision 3, which named `claude-code/<ver>`.
+3. **A first `system` block** `x-anthropic-billing-header: cc_version=0.19.0.<fp>; cc_entrypoint=cli;` whose
+   `<fp>` is a **server-recomputed** fingerprint: `sha256('59cf53e54c78' + msg[4]+msg[7]+msg[20] + version)`,
+   first **3 hex** chars, sampled from the **first user message** (missing index → `'0'`). It MUST be derived
+   from the exact text sent. `cc_version` must match the UA version. **This was the final unlock.**
+This **sharpens** the recon's abstracted "recognition = token + client_id + UA + oauth beta + billing header"
+([[oauth-recon]] §5e): the billing header is a *system block carrying a validated fingerprint*, not an HTTP
+header, and the oauth beta is one of several. The 2026-06-22 ADR's "no system-prompt **identity** spoof"
+stands (openclaude ships an "OpenClaude" identity and still serves — Wisp keeps its own Inquire prompt); but
+"no system prompt at all" was never true — the attribution block is mandatory.
+
+**Why these aren't guesses:** confirmed by the F5 round-trip (each header set retested live) + the exact bytes
+read from openclaude's `constants/system.ts` (`getAttributionHeader`) / `utils/fingerprint.ts`
+(`computeFingerprint`, salt `59cf53e54c78`, indices 4/7/20) / `services/api/claude.ts` (system-block assembly).
+The diagnostic that found it: dump the full 429 response headers — their absence proved synthetic-not-real.
+
+**`cch` attestation still unreproducible/unenforced:** the `cch=00000` token Bun's `Attestation.zig` overwrites
+is omitted (no native attestation build) and the request serves fine — confirming the dormant kill-switch is
+not yet enforced.
+
+**Reversibility:** the modules are additive (drop the row + two files). But the fingerprint recipe (salt,
+indices 4/7/20, 3-hex slice, version-must-match-UA) and the `claude-code-20250219` beta are the live contract,
+not preferences — don't "simplify" them away or the backend 429s again. Reference: openclaude
+`constants/system.ts`, `utils/fingerprint.ts`, `services/api/claude.ts`. See [[gotchas]].
+
+## 2026-06-23 — Anthropic native chat streaming (slice #29); model-spec 1M caps; effort deferred
+**Decision:** Shipped Anthropic text streaming in the native chat / Ctrl+I picker. New pure cores in
+`catalog.ts` (TDD, `npm test` **170/170**): `buildAnthropicMessagesBody` (the one tested body builder —
+`anthropicInquire` refactored to share it; system→top-level block array led by the attribution, stream flag
+optional), `anthropicTextDelta`/`reduceAnthropicTextEvents` (Messages SSE → text; `content_block_delta` →
+`text_delta`, `error` event throws), `anthropicModelCaps`, the `SseEvent` alias + `AnthropicMessage` type.
+`codexClient.ts` **exported `sseBlocks`** (the provider-agnostic chunk→block splitter, now shared).
+`anthropicClient.ts` gained pure `anthropicMessagesHeaders` (testable recognition contract) + a shared
+`anthropicMessagesRequest` + the `anthropicStream` generator. `chatProvider.ts` got `anthropicSignedIn`/
+`anthropicCreds` deps, usability + caps branches, an Anthropic streaming branch (text-only), and
+`toAnthropicMessages`; `extension.ts` wired the two getters. **F5 streaming chat PASSED.**
+
+**Caps advertise the model-spec windows, not a conservative floor.** `anthropicModelCaps` returns
+Opus/Sonnet 4.x = **1M** context (Opus 128K output, Sonnet 64K), Haiku 4.5 = 200K/64K — the real model
+maxes (Claude API catalog; 1M is standard, no beta). Rejected a flat 200K "safe floor": its only upside
+guards an *unverified, avoidable* case (the agent packs >200K **and** the subscription backend rejects),
+while its downside is certain — Opus/Sonnet shown false and long chats truncated early on the OAuth-moat
+feature. **⚠️ Caveat:** these are *model* maxes; the Claude.ai **subscription** Messages path the OAuth
+token rides may cap below 1M — unverified. The picker number is a budgeting hint, so an oversized pack
+surfaces as a (already-handled) backend error, not a silent lie. If the subscription path is observed to
+cap lower, lower the opus/sonnet `contextInput` then.
+**Why not tool-calling in #29:** scope — issue #29 is text streaming only; Anthropic tools (`tool_use`/
+`tool_result` round-trip) are slice **#30**. The request forwards **no** `options.tools`; `toolCalling:true`
+still advertised (required for picker visibility, same as Codex), honest once #30 lands.
+
+**Deferred — thinking/effort parity (follow-up, NOT #29).** Codex has a panel Effort knob threaded into its
+request (v1.2.0); Claude has none — `buildAnthropicMessagesBody` sends no `thinking` / `output_config.effort`,
+so on Opus 4.8 chat replies run **thinking-OFF**, effort default. Claude supports adaptive thinking + effort
+(low→max), so this is a real parity gap, deferred by choice. **Blocker before building it:** must probe that
+the **subscription OAuth Messages path** accepts `thinking`/`output_config.effort` *without tripping the
+synthetic-429 fingerprint contract* (#28) — adding body fields changes the shape the backend fingerprints.
+**Reversibility:** the streaming cores + caps are additive (easy to drop). The 1M-over-200K call is soft
+(one-number revert if the subscription path caps lower). Don't advertise `toolCalling` *and* forward tools
+until #30; don't add `thinking`/`effort` fields without the subscription-path probe first.
+
+## 2026-06-23 — Anthropic tool-calling parity (slice #30); the toolCalling flag is now honest
+**Decision:** Wired real tool calling for the Anthropic chat branch — forward agent tools, round-trip
+`tool_use`/`tool_result` content blocks — making the `toolCalling:true` flag (advertised since #29 for picker
+visibility) **honest**. New pure cores in `catalog.ts` (TDD, `npm test` **187/187**): `toAnthropicTools`,
+`reduceAnthropicToolCalls`, extended `AnthropicMessage` (`toolCalls`/`toolResults`) + `buildAnthropicMessagesBody`
+(content-block expansion + `tools`/`tool_choice`), `parseToolInput`. `anthropicClient.ts`: `AnthropicStreamEvent`
+→ `{text}|{toolCall}` union, tools threaded, `anthropicStream` collects `content_block_start`/`content_block_delta`
+and folds via the reducer at stream end. `chatProvider.ts`: Anthropic branch forwards `options.tools` + maps
+`toolMode`→`tool_choice`, emits `LanguageModelToolCallPart`; `toAnthropicMessages` carries the round-trip. Mirrors
+Codex #15. **F5 PASSED** — Claude fired 5 parallel `Read` calls, results round-tripped, loop completed.
+
+**The load-bearing facts — Anthropic's Messages tool wire format differs from Codex's Responses format** (these
+are the live contract, confirmed against the API + the openclaude reference, not preferences):
+1. **No strict-schema closure.** Anthropic accepts a plain JSON `input_schema` — NO `additionalProperties:false` /
+   required-all-keys. `toAnthropicTools` passes the schema through verbatim (do NOT port Codex's
+   `enforceStrictResponsesSchema`; it's unneeded and Anthropic doesn't require it).
+2. **`tool_choice` is an OBJECT** `{type:'auto'|'any'}` — not Codex's string `'auto'|'required'`. VS Code
+   `Required`→`'any'`.
+3. **Parallel calls are SIBLING `tool_use` blocks inside ONE assistant turn's content array** (after the optional
+   leading text block) — not separate items. Codex emits flat `function_call` items instead.
+4. **`tool_use` block `input` is a PARSED object** (Codex round-trips the raw JSON string). `parseToolInput`
+   parses `argsJson`, degrading bad/partial JSON to `{}`.
+5. **Streaming keys by content-block `index`** (`content_block_start.content_block.type==='tool_use'` carries the
+   `toolu_` id+name; `content_block_delta.delta.type==='input_json_delta'` accumulates `partial_json`) — Codex
+   keys by item id.
+6. **User turn = `tool_result` block FIRST, then text** (the API requires the assistant-tool_use → user-tool_result
+   adjacency).
+
+**The #28 fingerprint contract survived untouched** — `firstUserMessage` is still sourced from the first
+non-system turn's `.content` TEXT; `tools` ride as a separate top-level body key, never the system attribution
+block; the fingerprint samples only first-user-message text, not body fields. #30's tools rode the subscription
+path with no synthetic-429 — partial evidence the deferred thinking/effort fields (their own slice) will too,
+but probe before shipping them.
+
+**Adversarial review (20-agent workflow):** 0 code bugs; 3 coverage gaps confirmed → 2 regression tests added
+(full round-trip ordering, multi-parallel `tool_use` blocks), 1 justified-skip (the `chatProvider` `toolMode`
+seam — a vscode-importing non-pure module deliberately kept out of the pure unit suite, same as Codex; the
+`'auto'|'any'` union type catches a copy-paste `'required'` at compile time).
+
+**Reversibility:** the cores are additive (easy to drop). But the six wire-format facts are the live contract —
+don't "simplify" Anthropic tools toward the Codex/strict shape, or the backend rejects them. Images stay deferred
+(own follow-up). Reference: openclaude `src/utils/api.ts`, `src/services/api/claude.ts`, `src/utils/messages.ts`.
 
 ## Related
 - [[overview]]

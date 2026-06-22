@@ -79,10 +79,11 @@ export const codexInquire = async (args: CodexRequestArgs): Promise<string> => {
 
 // ----------------------------- Streaming ----------------------------- //
 
-// Yield complete SSE blocks off a Responses stream as they arrive: decode each chunk, split on the blank
-// line that ends a block, hold the trailing partial in the buffer until the next chunk completes it, then
-// flush whatever remains at end-of-stream.
-async function* sseBlocks(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+// Yield complete SSE blocks off a byte stream as they arrive: decode each chunk, split on the blank line
+// that ends a block, hold the trailing partial in the buffer until the next chunk completes it, then flush
+// whatever remains at end-of-stream. Provider-agnostic (block framing, not event names) — Codex's Responses
+// stream and Anthropic's Messages stream both flow through it; anthropicClient reuses it.
+export async function* sseBlocks(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
