@@ -8,58 +8,61 @@ tags: [context, active-work]
 # Active Work
 
 _Last updated: 2026-06-23 by Opus 4.8 (auto)._
-_At commit: #28/#29/#30 on `feat/anthropic-oauth` (open PR #31) + slice-#31 thinking/effort work committed on
-branch `feat/anthropic-thinking-effort` (off `feat/anthropic-oauth`). `CLAUDE.md` still uncommitted —
-pre-existing, unrelated; decide separately._
+_At commit: #32 (Anthropic `max` effort) about to be committed on `feat/anthropic-thinking-effort`.
+Shipping the WHOLE Anthropic stack (#28–#32) to `main` as release **1.3.0**. `CLAUDE.md` still
+uncommitted — pre-existing, unrelated; left out of the release commit on purpose._
 
 ## Current focus
-**Anthropic OAuth Provider — slice "#31" (thinking/effort parity) is DONE, F5-verified, committed + shipped.**
-Claude chat/Inquire now honor the shared `wisp.effort` knob: `output_config.effort` + `thinking:{type:'adaptive'}`
-ride the body behind the `effort-2025-11-24` beta header, model-gated, with `xhigh→high` clamp on non-Opus-4.7/8.
-The panel Effort select is ungated for Anthropic. **F5 PASSED** — effort knob live for Claude, no synthetic-429
-(blocker probe resolved positive). `max` effort deferred → issue #32.
+**Slice #32 — Anthropic `max` effort — DONE, eyeball-passed. Releasing the full Anthropic provider to
+`main` as 1.3.0.** The Effort picker now mirrors the first-party Claude Code `/effort` slider: every
+effort-capable Claude shows the full `low→medium→high→xhigh→max` ladder; the wire clamps to each model's
+ceiling (`anthropicThinkingEffort`), so an offered `xhigh`/`max` degrades to `high` rather than 400-ing.
 
 ## State
-- **Done this session (#31):** `anthropicThinkingEffort(model, effort)` pure core in `catalog.ts` (model-gate
-  `/opus-4-[5-8]/`+`sonnet-4-6`, `xhigh→high` clamp via `/opus-4-[78]/`); `buildAnthropicMessagesBody` takes
-  `effort?`, spreads the fragment. `anthropicClient.ts`: `effort-2025-11-24` added to `ANTHROPIC_BETA`,
-  `AnthropicRequestArgs.effort?` threaded into the body. `extension.ts` (Inquire) + `chatProvider.ts` (chat/agent)
-  pass `activeEffort()`; the shared dep `codexEffort`→`effort`; panel effort ungated for Anthropic
-  (`isCodexProvider(p) || isAnthropicProvider(p)`). `app.tsx` Effort select data-gated (`state.effort !== undefined`).
-  **9 new tests**, **`npm test` 196/196**; tsc (root+webview) + vite clean.
-- **Review (cavecrew-reviewer, pre-commit):** caught 2 real issues → fixed (the `xhigh`-on-Sonnet 400 via the
-  clamp; the `[5-9]` over-match tightened to `[5-8]`). 1 question (thinking/effort coupling) → kept, intentional.
-- **In flight:** nothing mid-edit. #31 committed on `feat/anthropic-thinking-effort`, PR opened (stacked on #31).
+- **Done this session (#32):** `EffortLevel = CodexEffort | 'max'` superset; `standardEffortToCodex`
+  (`max→xhigh`) for the Codex wire; `modelSupportsAnthropicMax = /opus-4-[678]/`; `anthropicThinkingEffort`
+  gained a `max→high` clamp beside the `xhigh→high` one; `effortOptionsFor(provider)` — Anthropic → full
+  `low→max`, Codex → `low→xhigh` (NOT model-gated — capability lives in the clamp, mirrors official). Threaded
+  `EffortLevel` through extension/chatProvider/anthropicClient; Codex send-sites wrap `standardEffortToCodex`;
+  `selectEffort` accepts `max`; webview renders from `state.effortOptions`. **6 new tests**, `npm test`
+  **204/204**, tsc (root+webview) + vite clean.
+- **Release prep:** `package.json`/`package-lock.json` 1.2.0 → **1.3.0**; `CHANGELOG.md` `[1.3.0]` entry
+  covers the full Anthropic provider (#28–#32). Eyeball passed.
+- **In flight:** the merge orchestration of the 2-PR stack to `main` (see Pick up here).
 - **Blocked:** none.
 
 ## Pick up here
-1. **Slice #32 — Anthropic `max` effort** (GitHub issue #32). Widen the shared effort type past `xhigh`, add
-   per-model panel option gating (`max` is Opus-4.6+-only), a `max→high` clamp (the #31 `xhigh` clamp is the
-   template), and cross-provider normalization (Codex maps a stored `max`→`xhigh`, openclaude
-   `standardEffortToOpenAI`). Reference: openclaude `src/utils/effort.ts`.
+1. **Land the stack on `main` (1.3.0).** The branch `feat/anthropic-thinking-effort` is a linear descendant
+   of `main`: `main → #28 → #29 → #30 → #31-effort(812d7a8) → #32`. Two open PRs: **#31** (umbrella,
+   `feat/anthropic-oauth → main`, contains #28–#30) and **#33** (`feat/anthropic-thinking-effort →
+   feat/anthropic-oauth`, contains #31-effort + #32). Plan: merge **#31** first (lands #28–#30), then
+   `gh pr edit 33 --base main` and merge **#33** (lands effort + max). Repo convention = merge-commit
+   (`--merge`, cf. the v1.2.0 "Merge pull request #26"). Tag `v1.3.0` after, to match the `v1.2.0` tag.
 2. **Subscription 1M context ceiling** (separate small probe) — caps advertise model-spec 1M for Opus/Sonnet;
    if a long-context chat 4xx/413s, the subscription path caps lower → drop their `contextInput`. See [[decisions]].
 
 ## Open questions
 - **Subscription context ceiling** — is 1M actually granted on the Claude.ai OAuth path, or does it cap (~200K)?
-- _(Resolved #31:)_ the subscription OAuth Messages path accepts `output_config.effort`/`thinking` with no
-  synthetic-429 — confirmed at F5.
+- **Does Sonnet `max` actually 400, or clamp server-side?** Moot for us (we pre-clamp to `high`), but the
+  first-party client showing `max` for Sonnet implies it clamps, not errors. The issue #32 claim ("max 400s
+  on Sonnet") drove the original gating; we overrode it to match the official picker.
 
 ## Skills for next session
-- superpowers:test-driven-development — #32's effort-type widening + clamp wants a red-green loop on `anthropicThinkingEffort`.
-- /preset scope — to enter #32 (restate, plan the cross-provider normalization, go/no-go).
+- /preset ship — if any merge step remains, finish the orchestration + tag.
 
 ## Recent context
-- **#30 mirrored Codex #15 but Anthropic's wire format differs:** tools have NO strict-schema closure (Anthropic
-  accepts a plain `input_schema`); parallel tool calls are **sibling `tool_use` blocks inside ONE assistant turn**
-  (Codex emits flat `function_call` items); `tool_choice` is an **object** `{type:'auto'|'any'}` (Codex: a string
-  `'auto'|'required'`); `tool_use` block `input` is a **parsed object** (Codex round-trips the raw JSON string).
-- **The #28 fingerprint survived #30 untouched** — `firstUserMessage` still sourced from the first non-system
-  turn's `.content` text; `tools` ride as a separate top-level body key, never the system attribution block.
-- **Images still deferred** for Anthropic chat (dropped in `toAnthropicMessages`) — a separate follow-up, not #30.
+- **Effort taxonomy (verified against openclaude `src/utils/effort.ts` + the first-party Claude Code
+  `/effort` slider):** the ladder is `low|medium|high|xhigh|max` (5 levels; `xhigh` and `max` are distinct,
+  NOT aliases). `max` = Opus 4.6/4.7/4.8 (`modelSupportsMaxEffort`); `xhigh` = Opus 4.7/4.8 (+ OpenAI/Codex).
+  Opus 4.6 takes `max` but NOT `xhigh` — the sets are independent. Sonnet 4.6 / Opus 4.5 take neither (top at
+  `high`). The first-party picker is uniform (shows the full ladder for all) and clamps the *applied* value
+  per model — we copy that.
+- **Why the picker is provider-only, not model-gated:** issue #32 specified per-model `max` gating; we
+  overrode it after seeing the first-party client expose `max` for Sonnet and clamp on apply. The clamp
+  (`anthropicThinkingEffort`) is the single source of capability truth; the picker just mirrors official.
 
 ## Related
 - [[overview]]
-- [[oauth-recon]] — the design source of truth for this feature
-- [[decisions]] — 2026-06-23 #30 entry (Anthropic tool wire contract)
-- [[gotchas]] — synthetic-429 / fingerprint contract; F5 dup-extension trap
+- [[oauth-recon]] — the design source of truth for the Anthropic provider
+- [[decisions]] — 2026-06-23 entries (#30 tool wire contract; #32 max effort + picker pivot)
+- [[gotchas]] — effort taxonomy trap; synthetic-429 / fingerprint contract; F5 dup-extension trap

@@ -28,8 +28,8 @@ import OpenAI from 'openai';
 import {
   Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
   buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, toCodexResponsesTools, isCodexProvider, codexModelCaps,
-  isAnthropicProvider, anthropicModelCaps, toAnthropicTools,
-  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort, type AnthropicCreds,
+  isAnthropicProvider, anthropicModelCaps, toAnthropicTools, standardEffortToCodex,
+  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type EffortLevel, type AnthropicCreds,
 } from './catalog';
 import { codexStream } from './codexClient';
 import { anthropicStream } from './anthropicClient';
@@ -49,7 +49,7 @@ export type ChatProviderDeps = {
   // (so a not-signed-in Codex stays hidden) and its refreshed OAuth creds for the streaming Responses call.
   codexSignedIn: () => Promise<boolean>;
   codexCreds: () => Promise<CodexCreds | undefined>;
-  effort: () => CodexEffort;                        // the panel's reasoning Effort — shared by Codex + Anthropic (same value Inquire uses)
+  effort: () => EffortLevel;                        // the panel's reasoning Effort — shared by Codex + Anthropic (same value Inquire uses)
   // Anthropic is the same "usable when signed in" shape as Codex (no API key): the signed-in flag gates
   // the row, current() returns the refreshed OAuth bundle for the streaming Messages call.
   anthropicSignedIn: () => Promise<boolean>;
@@ -134,7 +134,9 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       modelMap: deps.modelMap(),
       customBaseUrl: deps.customBaseUrl(),
       caps,
-      effort: deps.effort(),
+      // Only feeds the Codex row's picker-label suffix — normalize so a knob left on 'max' reads as its
+      // Codex-honest 'xhigh', never a level Codex can't send (#32).
+      effort: standardEffortToCodex(deps.effort()),
     });
   },
 
@@ -159,7 +161,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       const tools = toCodexResponsesTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
       const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
       try {
-        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), effort: deps.effort(), tools, toolChoice, signal: controller.signal })) {
+        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), effort: standardEffortToCodex(deps.effort()), tools, toolChoice, signal: controller.signal })) {
           if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
           // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
           let input: object = {};

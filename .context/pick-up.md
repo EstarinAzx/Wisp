@@ -10,37 +10,35 @@ tags: [context, pick-up]
 Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate, then `.context/decisions.md`
 (2026-06-23 entries) for the Anthropic effort wire contract + the #28 fingerprint contract.
 
-**Last session (2026-06-23):** Built + F5-verified **slice "#31" — Anthropic thinking/effort parity**. Claude
-chat/Inquire now honor the shared `wisp.effort` knob: `output_config.effort` (string `low|medium|high|xhigh`) +
-`thinking:{type:'adaptive'}` ride the Messages body behind the **`effort-2025-11-24` beta header** (load-bearing —
-without it the backend silently drops effort). Model-gated (`anthropicThinkingEffort` in `catalog.ts`:
-`/opus-4-[5-8]/`+`sonnet-4-6`; Haiku/older get neither), with **`xhigh→high` clamp** on all but Opus 4.7/4.8. The
-shared knob's `chatProvider` dep was renamed `codexEffort`→`effort`; the panel Effort select is ungated for
-Anthropic (data-gated `state.effort !== undefined`). **F5 PASSED** — effort knob live for Claude, no synthetic-429
-(the blocker probe resolved positive). 9 new tests, `npm test` **196/196**, tsc+webview+vite clean. A
-cavecrew-reviewer pass pre-commit caught the `xhigh`-on-Sonnet 400 and the `[5-9]` over-match → both fixed.
-Committed on branch `feat/anthropic-thinking-effort` (off `feat/anthropic-oauth`), PR opened stacked on PR #31.
+**Last session (2026-06-23):** Built + eyeball-passed **slice #32 — Anthropic `max` effort**, then cut release
+**1.3.0** shipping the whole Anthropic provider (#28–#32) to `main`. The Effort picker now mirrors the
+first-party Claude Code `/effort` slider: `effortOptionsFor(provider)` shows Anthropic the full
+`low→medium→high→xhigh→max` ladder (NOT model-gated), Codex stops at `xhigh`. Capability lives in the wire
+clamp — `anthropicThinkingEffort` does `xhigh→high` (non-Opus-4.7/8) and `max→high`
+(`modelSupportsAnthropicMax = /opus-4-[678]/`); `standardEffortToCodex` folds a stored `max→xhigh` for the
+Codex wire. New type `EffortLevel = CodexEffort | 'max'`. 6 new tests, `npm test` **204/204**, tsc+webview+vite
+clean. `package.json`/lock → 1.3.0, `CHANGELOG.md` `[1.3.0]` entry added.
 
-**Next task: slice #32 — Anthropic `max` effort** (GitHub issue #32). Enter with **`/preset scope 32`**. `max`
-was deferred from #31 because the Effort select + `wisp.effort` knob are **shared** with Codex and the
-`CodexEffort` type tops at `xhigh` (Codex has no `max`). To add it: (1) widen the shared effort type past `xhigh`;
-(2) per-model panel option gating — show `max` only for max-capable Claude (Opus 4.6/4.7/4.8); (3) a `max→high`
-clamp in `anthropicThinkingEffort` (the #31 `xhigh` clamp is the exact template; `modelSupportsAnthropicMax =
-/opus-4-[678]/`); (4) cross-provider normalization — a stored `max` must map for Codex (openclaude
-`standardEffortToOpenAI`: `max→xhigh`) so switching Provider doesn't send an invalid level. TDD `anthropicThinkingEffort`.
+**This session also handled the merge to `main`** — see [[active-work]] "Pick up here" for exact PR-merge
+state. If the merge orchestration was interrupted, finish it: the 2-PR stack is **#31** (umbrella,
+`feat/anthropic-oauth → main`, slices #28–30) then **#33** (`feat/anthropic-thinking-effort →` repointed to
+`main`, effort + max). Repo convention = merge-commit (`--merge`). Tag `v1.3.0` after (matches the `v1.2.0`
+tag), and consider a GitHub release.
+
+**Next task (once 1.3.0 is landed): the subscription 1M-context-ceiling probe.** Caps advertise model-spec 1M
+for Opus/Sonnet; if a long-context Claude chat 4xx/413s, the Claude.ai OAuth path caps lower (~200K?) → drop
+their `contextInput` in `anthropicModelCaps`. Small, isolated.
 
 **Landmines / things to know:**
-- **The #28 fingerprint contract is load-bearing** — it samples first-user-message TEXT only, never body fields,
-  so #31's effort fields rode it safely (confirmed at F5). Keep any new body field out of the system attribution block.
-- **Effort wire shape (see [[decisions]] 2026-06-23 #31):** effort is `output_config.effort` (NESTED string), NOT
-  top-level, NOT `thinking.budget_tokens` (400s on Opus 4.7+). The `effort-2025-11-24` beta is required.
-- **The effort knob is shared Codex+Anthropic** — #32's type-widening + any clamp must not break the Codex path
-  (Codex tops at `xhigh`; a stored `max` needs the `max→xhigh` map before it reaches `codexReasoning`).
-- **Subscription 1M ceiling** still unverified — separate small probe (drop opus/sonnet `contextInput` if it 4xx/413s).
-- **`CLAUDE.md` still uncommitted** (pre-existing, unrelated) — decide separately. NOT part of #31.
+- **Effort is two independent capabilities, not one ladder** — `max` = Opus 4.6/4.7/4.8, `xhigh` = Opus 4.7/4.8.
+  Opus 4.6 has `max` but NOT `xhigh`. Sonnet 4.6 / Opus 4.5 have neither (ceiling `high`). The picker over-offers
+  and the wire clamps — by design. Source of truth: openclaude `src/utils/effort.ts`. See [[gotchas]].
+- **The #28 fingerprint contract is load-bearing** — samples first-user-message TEXT only, never body fields.
+  Keep any new body field out of the system attribution block.
+- **Effort wire shape:** `output_config.effort` (NESTED string), NOT top-level, NOT `thinking.budget_tokens`
+  (400s on Opus 4.7+). The `effort-2025-11-24` beta header is required or effort is silently dropped.
+- **`CLAUDE.md` still uncommitted** (pre-existing, unrelated) — deliberately excluded from the 1.3.0 commit.
 - **Before any F5:** uninstall `local.wisp` (stale-panel collision). See [[gotchas]].
-- **Not yet merged:** PR #31 (`feat/anthropic-oauth`→main, slices #28–30) and the #31 effort PR
-  (`feat/anthropic-thinking-effort`→`feat/anthropic-oauth`, stacked) are both open.
 
 Full state in [[active-work]]; the verified design in [[oauth-recon]]; the request/effort/tool contracts in
 [[decisions]] (2026-06-23); traps in [[gotchas]]; domain language in `CONTEXT.md`.

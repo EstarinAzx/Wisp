@@ -16,10 +16,10 @@
  *     fragments as they arrive so the native chat picker renders tokens live.
  */
 
-import { AnthropicCreds, buildAnthropicMessagesBody, anthropicTextDelta, reduceAnthropicToolCalls, parseSseBlock, type AnthropicMessage, type AnthropicTool, type AssembledToolCall, type CodexEffort } from './catalog';
+import { AnthropicCreds, buildAnthropicMessagesBody, anthropicTextDelta, reduceAnthropicToolCalls, parseSseBlock, type AnthropicMessage, type AnthropicTool, type AssembledToolCall, type EffortLevel } from './catalog';
 import { sseBlocks } from './codexClient';
 
-type AnthropicRequestArgs = { creds: AnthropicCreds; baseUrl: string; model: string; messages: AnthropicMessage[]; tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; effort?: CodexEffort; signal?: AbortSignal };
+type AnthropicRequestArgs = { creds: AnthropicCreds; baseUrl: string; model: string; messages: AnthropicMessage[]; tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; effort?: EffortLevel; signal?: AbortSignal };
 
 // What anthropicStream yields — an answer-text fragment, or a fully-assembled tool call (#30 agent mode).
 // The native-chat consumer maps these to LanguageModelTextPart / LanguageModelToolCallPart.

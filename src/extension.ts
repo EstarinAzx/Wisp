@@ -22,8 +22,8 @@ import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvid
 import {
   Provider, CUSTOM_ID, resolveModel, resolveBaseUrl, resolveKeyId, planLegacyMigration, planZenToGoMigration,
   buildEditPrompt, parseEditBlocks, applyEditBlocks, diffLines, isCodexProvider, isCodexSignedIn, CODEX_MODELS, DEFAULT_EFFORT,
-  isAnthropicProvider, isAnthropicSignedIn, ANTHROPIC_MODELS,
-  type CodexCreds, type CodexEffort, type AnthropicCreds,
+  isAnthropicProvider, isAnthropicSignedIn, ANTHROPIC_MODELS, standardEffortToCodex, effortOptionsFor,
+  type CodexCreds, type EffortLevel, type AnthropicCreds,
 } from './catalog';
 import { registerWispChatProvider } from './chatProvider';
 import { CodexAuth } from './codexAuth';
@@ -153,9 +153,10 @@ const keySlotFor = (p: Provider): string => keySlot(resolveKeyId(p));
 const activeModel = (): string =>
   resolveModel(globalState.get<Record<string, string>>(MODEL_MAP_KEY) ?? {}, activeProvider());
 
-// The Codex reasoning Effort — one global value (globalState), defaulting to medium so existing
-// behavior is unchanged. Codex-only; ignored by every keyed Provider.
-const activeEffort = (): CodexEffort => globalState.get<CodexEffort>(EFFORT_KEY) ?? DEFAULT_EFFORT;
+// The reasoning Effort — one global value (globalState), defaulting to medium so existing behavior is
+// unchanged. Shared by Codex + Anthropic; ignored by every keyed Provider. Stored as the wider EffortLevel
+// (#32 'max'); each send site normalizes (standardEffortToCodex for Codex, the clamp for Anthropic).
+const activeEffort = (): EffortLevel => globalState.get<EffortLevel>(EFFORT_KEY) ?? DEFAULT_EFFORT;
 
 // Base URL for the Active Provider. Built-ins use their hardcoded catalog URL; only Custom reads the
 // user-supplied, machine-scoped wisp.baseUrl (every built-in ignores that setting entirely).
@@ -266,7 +267,7 @@ const setModel = async (id: string): Promise<void> => {
 // Persist the Codex reasoning Effort (one global value in globalState). Unlike setModel — which mirrors
 // into wisp.model and rides the config-change listener back to the panel — a globalState write fires NO
 // config event, so re-push the panel state explicitly or the select would not reflect the change.
-const setEffort = async (effort: CodexEffort): Promise<void> => {
+const setEffort = async (effort: EffortLevel): Promise<void> => {
   await globalState.update(EFFORT_KEY, effort);
   void panel?.postState();
 };
@@ -318,6 +319,9 @@ const getState = async (): Promise<PanelState> => {
     // The reasoning-effort knob's current value (drives the panel's Effort select). Shared by the two
     // effort-aware OAuth Providers — Codex and Anthropic (#31); every other Provider leaves it undefined.
     effort: isCodexProvider(p) || isAnthropicProvider(p) ? activeEffort() : undefined,
+    // The option list backing that select — Anthropic shows the full low→max ladder (the wire clamps per
+    // model), Codex stops at xhigh; mirrors the first-party /effort slider (#32).
+    effortOptions: isCodexProvider(p) || isAnthropicProvider(p) ? effortOptionsFor(p) : undefined,
   };
 };
 
@@ -600,7 +604,7 @@ const inquire = async (): Promise<void> => {
         // Codex speaks the Responses API and Anthropic the Messages API (each its own client); every
         // other Provider uses the OpenAI SDK.
         if (codex) {
-          reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, effort: activeEffort(), signal: controller.signal });
+          reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, effort: standardEffortToCodex(activeEffort()), signal: controller.signal });
         } else if (anthropic) {
           reply = await anthropicInquire({ creds: anthropicCreds!, baseUrl: activeBaseUrl(), model, messages, effort: activeEffort(), signal: controller.signal });
         } else {

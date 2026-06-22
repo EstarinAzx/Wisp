@@ -7,7 +7,7 @@ import {
   base64url, codeVerifier, codeChallenge, oauthState,
   anthropicFingerprint, anthropicAttribution,
   buildAnthropicMessagesBody, reduceAnthropicTextEvents, anthropicModelCaps,
-  toAnthropicTools, reduceAnthropicToolCalls, anthropicThinkingEffort,
+  toAnthropicTools, reduceAnthropicToolCalls, anthropicThinkingEffort, effortOptionsFor,
   type Provider, type SseEvent,
 } from './catalog';
 import { anthropicMessagesHeaders } from './anthropicClient';
@@ -27,6 +27,24 @@ describe('isAnthropicProvider', () => {
     expect(isAnthropicProvider(provider({ kind: undefined }))).toBe(false);
     expect(isAnthropicProvider(provider({ kind: 'openai-chat' }))).toBe(false);
     expect(isAnthropicProvider(provider({ kind: 'codex' }))).toBe(false);
+  });
+});
+
+describe('effortOptionsFor', () => {
+  // Matches the official Claude Code /effort slider: every effort-capable Claude shows the FULL low→max
+  // ladder, regardless of model. The wire clamps to each model's ceiling (anthropicThinkingEffort), so an
+  // offered xhigh/max degrades rather than 400s — exactly what the first-party client does (#32).
+  it('offers the full low→max ladder for Anthropic, even a non-max model like Sonnet', () => {
+    expect(effortOptionsFor(provider({ kind: 'anthropic-oauth', defaultModel: 'claude-sonnet-4-6' })))
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(effortOptionsFor(provider({ kind: 'anthropic-oauth', defaultModel: 'claude-opus-4-8' })))
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  });
+
+  // Codex's wire tops at xhigh (no 'max' level) — the picker must not offer a level it can't send.
+  it('omits max for Codex', () => {
+    expect(effortOptionsFor(provider({ kind: 'codex', defaultModel: 'gpt-5.3-codex' })))
+      .toEqual(['low', 'medium', 'high', 'xhigh']);
   });
 });
 
@@ -219,6 +237,38 @@ describe('anthropicThinkingEffort', () => {
     expect(anthropicThinkingEffort('claude-opus-4-8', 'xhigh')).toEqual({
       thinking: { type: 'adaptive' },
       output_config: { effort: 'xhigh' },
+    });
+  });
+
+  // max (slice #32) rides output_config.effort on the max-capable Opus family (4.6-4.8, /opus-4-[678]/).
+  it('keeps max on a max-capable model', () => {
+    expect(anthropicThinkingEffort('claude-opus-4-8', 'max')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'max' },
+    });
+  });
+
+  // Opus 4.6 takes max even though it does NOT take xhigh — the two capability sets differ (openclaude).
+  it('keeps max on opus-4-6 (max-capable but not xhigh-capable)', () => {
+    expect(anthropicThinkingEffort('claude-opus-4-6', 'max')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'max' },
+    });
+  });
+
+  // Sonnet 4.6 is effort-capable but not max-capable — max clamps to high (mirrors the xhigh clamp).
+  it('clamps max to high on a model that does not support it', () => {
+    expect(anthropicThinkingEffort('claude-sonnet-4-6', 'max')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    });
+  });
+
+  // Opus 4.5 is effort-capable but predates max → clamp to high, not a wire 400.
+  it('clamps max to high on opus-4-5', () => {
+    expect(anthropicThinkingEffort('claude-opus-4-5', 'max')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
     });
   });
 });

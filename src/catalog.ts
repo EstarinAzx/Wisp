@@ -460,6 +460,17 @@ export const isCodexSignedIn = (creds: CodexCreds | undefined): boolean =>
 export type CodexEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type CodexReasoning = { effort: CodexEffort; summary: 'auto' };
 
+// The shared wisp.effort knob's type (slice #32). Superset of CodexEffort with 'max' on top — 'max' is an
+// Anthropic-only level (Codex's wire tops out at xhigh), so it lives here, NOT in CodexEffort. The stored
+// value is one global, normalized per-Provider at send time (standardEffortToCodex below; the Anthropic
+// clamp in anthropicThinkingEffort).
+export type EffortLevel = CodexEffort | 'max';
+
+// Map a stored EffortLevel onto Codex's wire type: 'max' has no Codex equivalent, so fold it to xhigh (its
+// ceiling) — mirrors openclaude standardEffortToOpenAI. Without this a knob left on 'max' after a Provider
+// switch would 400 the Responses call.
+export const standardEffortToCodex = (effort: EffortLevel): CodexEffort => (effort === 'max' ? 'xhigh' : effort);
+
 // One content part of a Responses input message: text (input_text for user/system, output_text for a
 // replayed assistant turn) or an image (input_image as a base64 data-URI / url).
 export type CodexContentPart = { type: 'input_text' | 'output_text'; text: string } | { type: 'input_image'; image_url: string };
@@ -903,20 +914,37 @@ const modelSupportsAnthropicEffort = (model: string): boolean => {
 // modelSupportsXHighEffort). Other effort-capable models (Sonnet 4.6, Opus 4.5/4.6) 400 on it.
 const modelSupportsAnthropicXHigh = (model: string): boolean => /opus-4-[78]/.test(model.toLowerCase());
 
+// max (slice #32) is Opus-4.6+-only (openclaude modelSupportsMaxEffort). Note this set differs from xhigh's:
+// Opus 4.6 takes max but NOT xhigh — the capabilities are independent, so the clamps below are separate.
+export const modelSupportsAnthropicMax = (model: string): boolean => /opus-4-[678]/.test(model.toLowerCase());
+
 // The thinking/effort fragment to spread into a Messages body, or {} when it must be omitted. Effort rides
 // output_config.effort (NOT a top-level field, NOT thinking.budget_tokens — both 400 on Opus 4.7+) behind
 // the effort-2025-11-24 beta header; adaptive thinking carries no budget. Omitted when no effort is threaded
-// (keeps the pre-#31 body byte-identical) or the model can't take it. xhigh clamps to high on models that
-// reject it (the panel offers xhigh for every effort-aware Provider). 'max' deferred (not a panel option).
-export const anthropicThinkingEffort = (model: string, effort?: CodexEffort): { thinking?: { type: 'adaptive' }; output_config?: { effort: CodexEffort } } => {
+// (keeps the pre-#31 body byte-identical) or the model can't take it. xhigh/max each clamp to high on models
+// that reject them — the panel offers a level for every effort-aware Provider, so a cross-model pick must
+// degrade rather than 400 (e.g. xhigh on Sonnet, max on Opus 4.5).
+export const anthropicThinkingEffort = (model: string, effort?: EffortLevel): { thinking?: { type: 'adaptive' }; output_config?: { effort: EffortLevel } } => {
   if (!effort || !modelSupportsAnthropicEffort(model)) return {};
-  const level = effort === 'xhigh' && !modelSupportsAnthropicXHigh(model) ? 'high' : effort;
+  let level: EffortLevel = effort;
+  if (level === 'xhigh' && !modelSupportsAnthropicXHigh(model)) level = 'high';
+  if (level === 'max' && !modelSupportsAnthropicMax(model)) level = 'high';
   return { thinking: { type: 'adaptive' }, output_config: { effort: level } };
 };
 
+// The effort levels the panel offers for a Provider. Mirrors the first-party Claude Code /effort slider:
+// every effort-capable Claude shows the FULL low→max ladder regardless of model — the wire clamps to the
+// model's ceiling (anthropicThinkingEffort), so an offered xhigh/max degrades, never 400s. Codex omits 'max'
+// (its wire tops at xhigh; standardEffortToCodex folds a stray 'max'→xhigh). Only Codex + Anthropic call
+// this — every other Provider hides the select. Not model-gated: capability lives in the clamp, not here.
+export const effortOptionsFor = (provider: Provider): EffortLevel[] =>
+  isAnthropicProvider(provider)
+    ? ['low', 'medium', 'high', 'xhigh', 'max']
+    : ['low', 'medium', 'high', 'xhigh'];
+
 export const buildAnthropicMessagesBody = (args: {
   model: string; messages: AnthropicMessage[]; maxTokens: number; version: string; stream?: boolean;
-  tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; effort?: CodexEffort;
+  tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; effort?: EffortLevel;
 }) => {
   const wispSystem = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
   const convo = args.messages.filter((m) => m.role !== 'system');

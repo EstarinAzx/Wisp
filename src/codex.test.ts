@@ -5,7 +5,7 @@ import {
   isCodexProvider, isCodexSignedIn,
   buildCodexResponsesBody, reduceResponsesTextEvents, extractResponsesText, parseSseBlock,
   decodeJwtPayload, parseChatgptAccountId, shouldRefreshCodexToken,
-  parseCodexAuthJson, codexReasoning, codexModelCaps, CODEX_MODELS,
+  parseCodexAuthJson, codexReasoning, standardEffortToCodex, codexModelCaps, CODEX_MODELS,
   toCodexResponsesTools, reduceResponsesToolCalls,
   type Provider, type EditMessage, type CodexResponsesEvent,
 } from './catalog';
@@ -308,6 +308,23 @@ describe('codexReasoning', () => {
   it('still omits reasoning for spark / gpt-4.x regardless of Effort', () => {
     expect(codexReasoning('gpt-4.1', 'high')).toBeUndefined();
     expect(codexReasoning('gpt-5.3-codex-spark', 'low')).toBeUndefined();
+  });
+});
+
+describe('standardEffortToCodex', () => {
+  // The shared wisp.effort knob is EffortLevel (includes 'max'); Codex's wire type tops out at xhigh.
+  // A stored 'max' (set while on Anthropic, then switched Provider) must map to xhigh or it 400s on the
+  // Responses call. Mirrors openclaude standardEffortToOpenAI (max→xhigh).
+  it('maps max to xhigh', () => {
+    expect(standardEffortToCodex('max')).toBe('xhigh');
+  });
+
+  // Every other level is already a valid CodexEffort — pass through untouched.
+  it('passes through the non-max levels unchanged', () => {
+    expect(standardEffortToCodex('low')).toBe('low');
+    expect(standardEffortToCodex('medium')).toBe('medium');
+    expect(standardEffortToCodex('high')).toBe('high');
+    expect(standardEffortToCodex('xhigh')).toBe('xhigh');
   });
 });
 

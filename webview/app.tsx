@@ -30,7 +30,8 @@ type State = {
   kind?: 'openai-chat' | 'codex' | 'anthropic-oauth';
   signedIn?: boolean;
   modelOptions?: string[];
-  effort?: 'low' | 'medium' | 'high' | 'xhigh';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  effortOptions?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]; // host-computed; 'max' only for max-capable Claude (#32)
 };
 
 type InMsg =
@@ -293,15 +294,16 @@ export const App = () => {
             class="input"
             value={state.effort ?? 'medium'}
             onChange={(e) => {
-              const value = e.currentTarget.value as 'low' | 'medium' | 'high' | 'xhigh';
+              const value = e.currentTarget.value as 'low' | 'medium' | 'high' | 'xhigh' | 'max';
               setState({ ...state, effort: value }); // optimistic; the state push confirms
               vscode.postMessage({ type: 'selectEffort', value });
             }}
           >
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
+            {/* Options come from the host so 'max' shows only for max-capable Claude (#32) — no capability
+                regex duplicated in this bundle. Fall back to the base set if the host omitted them. */}
+            {(state.effortOptions ?? ['low', 'medium', 'high', 'xhigh']).map((o) => (
+              <option value={o}>{o}</option>
+            ))}
           </select>
         </section>
       )}

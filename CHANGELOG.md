@@ -4,6 +4,26 @@ All notable changes to **Wisp** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-06-23
+
+Your Claude.ai subscription is now a first-class backend — sign in, no API key.
+
+### Added
+
+- **Anthropic provider — subscription Claude in chat + Inquire.** Sign in with your
+  Claude.ai account (OAuth) and run Claude on your own Max/Pro/Team subscription — native
+  Chat, Agent mode, and `Ctrl+I` Inquire, no API key. Tokens live in the OS keychain.
+  (Issues #28, #29)
+- **Tool calling / Agent mode for Claude.** Claude is first-class in Agent / Edit mode —
+  parallel tool calls stream as sibling `tool_use` blocks, wired through the same chat
+  surface as the other providers. (Issue #30)
+- **Reasoning Effort for Claude.** The side-panel **Effort** knob now governs Claude too
+  (shared with Codex): one global value driving every call — Inquire and chat alike — via
+  adaptive thinking + `output_config.effort`. The picker mirrors the first-party Claude Code
+  `/effort` slider with the full `low` → `medium` → `high` → `xhigh` → `max` ladder; each
+  level clamps to the model's ceiling on the wire (so a Sonnet pick of `xhigh`/`max` runs at
+  `high`, never errors), and `max` lands on the capable Opus models (4.6–4.8). (Issues #31, #32)
+
 ## [1.2.0] — 2026-06-21
 
 Codex reasoning depth is now yours to set.
