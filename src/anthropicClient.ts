@@ -16,14 +16,14 @@
  *     fragments as they arrive so the native chat picker renders tokens live.
  */
 
-import { AnthropicCreds, buildAnthropicMessagesBody, anthropicTextDelta, parseSseBlock, type AnthropicMessage } from './catalog';
+import { AnthropicCreds, buildAnthropicMessagesBody, anthropicTextDelta, reduceAnthropicToolCalls, parseSseBlock, type AnthropicMessage, type AnthropicTool, type AssembledToolCall } from './catalog';
 import { sseBlocks } from './codexClient';
 
-type AnthropicRequestArgs = { creds: AnthropicCreds; baseUrl: string; model: string; messages: AnthropicMessage[]; signal?: AbortSignal };
+type AnthropicRequestArgs = { creds: AnthropicCreds; baseUrl: string; model: string; messages: AnthropicMessage[]; tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; signal?: AbortSignal };
 
-// What anthropicStream yields — an answer-text fragment. (Tool calls are slice #30; #29 is text only.) The
-// native-chat consumer maps these to LanguageModelTextPart.
-export type AnthropicStreamEvent = { type: 'text'; value: string };
+// What anthropicStream yields — an answer-text fragment, or a fully-assembled tool call (#30 agent mode).
+// The native-chat consumer maps these to LanguageModelTextPart / LanguageModelToolCallPart.
+export type AnthropicStreamEvent = { type: 'text'; value: string } | { type: 'toolCall'; call: AssembledToolCall };
 
 // Inquire's whole-file edits can be sizeable; 16K keeps a non-streaming request under the fetch timeout
 // ceiling while leaving ample room for the edit blocks. The streaming chat path reuses it.
@@ -67,7 +67,7 @@ const anthropicMessagesRequest = async (args: AnthropicRequestArgs & { stream?: 
   const res = await fetch(`${args.baseUrl}/v1/messages`, {
     method: 'POST',
     headers: anthropicMessagesHeaders(bearer, args.stream),
-    body: JSON.stringify(buildAnthropicMessagesBody({ model: args.model, messages: args.messages, maxTokens: ANTHROPIC_MAX_TOKENS, version: CLAUDE_CODE_VERSION, stream: args.stream })),
+    body: JSON.stringify(buildAnthropicMessagesBody({ model: args.model, messages: args.messages, maxTokens: ANTHROPIC_MAX_TOKENS, version: CLAUDE_CODE_VERSION, stream: args.stream, tools: args.tools, toolChoice: args.toolChoice })),
     signal: args.signal,
   });
   if (!res.ok) {
@@ -89,16 +89,23 @@ export const anthropicInquire = async (args: AnthropicRequestArgs): Promise<stri
 // ----------------------------- Streaming ----------------------------- //
 
 // Stream a Claude reply, yielding answer-text fragments as they arrive so the native chat picker renders
-// tokens live. The Messages SSE delivers text on content_block_delta(text_delta) events; an `error` event
-// is a backend failure (throw its message). Lifecycle events (message_start, ping, *_stop) carry no text.
+// tokens live, then any assembled tool calls at stream end (#30 agent mode). The Messages SSE delivers text
+// on content_block_delta(text_delta); a tool_use block streams across content_block_start +
+// input_json_delta events that can't be surfaced until whole, so they are collected and folded by the
+// reducer once the stream ends (the assemble-at-end pattern codexStream uses). An `error` event is a backend
+// failure (throw its message); other lifecycle events carry no answer text.
 export async function* anthropicStream(args: AnthropicRequestArgs): AsyncGenerator<AnthropicStreamEvent> {
   const res = await anthropicMessagesRequest({ ...args, stream: true });
   if (!res.body) return;
+  const toolEvents = [];
   for await (const block of sseBlocks(res.body)) {
     const ev = parseSseBlock(block);
     if (!ev) continue;
     if (ev.event === 'error') throw new Error(ev.data?.error?.message ?? 'Anthropic response failed');
     const text = anthropicTextDelta(ev);
-    if (text) yield { type: 'text', value: text };
+    if (text) { yield { type: 'text', value: text }; continue; }
+    // tool_use blocks arrive in fragments — collect the relevant events, fold them after the stream ends.
+    if (ev.event === 'content_block_start' || ev.event === 'content_block_delta') toolEvents.push(ev);
   }
+  for (const call of reduceAnthropicToolCalls(toolEvents)) yield { type: 'toolCall', call };
 }

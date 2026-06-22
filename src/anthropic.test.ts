@@ -7,6 +7,7 @@ import {
   base64url, codeVerifier, codeChallenge, oauthState,
   anthropicFingerprint, anthropicAttribution,
   buildAnthropicMessagesBody, reduceAnthropicTextEvents, anthropicModelCaps,
+  toAnthropicTools, reduceAnthropicToolCalls,
   type Provider, type SseEvent,
 } from './catalog';
 import { anthropicMessagesHeaders } from './anthropicClient';
@@ -258,5 +259,194 @@ describe('anthropicMessagesHeaders', () => {
   it('adds the event-stream Accept only when streaming', () => {
     expect(anthropicMessagesHeaders('tok', true)['Accept']).toBe('text/event-stream');
     expect('Accept' in anthropicMessagesHeaders('tok')).toBe(false);
+  });
+});
+
+describe('toAnthropicTools', () => {
+  // VS Code tool defs → Anthropic Messages tools: name/description/input_schema, the schema passed
+  // through verbatim. Unlike Codex's strict Responses tools, Anthropic does NOT require closed objects —
+  // no additionalProperties:false, no required-all-keys enforcement; the schema rides as-is.
+  it('maps a tool to an Anthropic tool, schema passed through unchanged', () => {
+    expect(toAnthropicTools([{ name: 'readFile', description: 'read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }]))
+      .toEqual([{
+        name: 'readFile', description: 'read a file',
+        input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+      }]);
+  });
+
+  // A tool with no schema still maps — input_schema becomes a (non-strict) empty object schema.
+  it('defaults missing inputSchema to an empty object schema', () => {
+    expect(toAnthropicTools([{ name: 'noArgs', description: 'd' }]))
+      .toEqual([{ name: 'noArgs', description: 'd', input_schema: { type: 'object', properties: {} } }]);
+  });
+});
+
+describe('reduceAnthropicToolCalls', () => {
+  // The Messages streaming shape: a tool_use block is announced by content_block_start (carrying the
+  // toolu_ id + name) and its arguments arrive as content_block_delta(input_json_delta) partial_json
+  // fragments — both keyed by the content-block `index` (unlike Codex, which keys by item id).
+  it('reassembles a tool call from content_block_start + input_json_delta fragments', () => {
+    const events: SseEvent[] = [
+      { event: 'content_block_start', data: { index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'readFile' } } },
+      { event: 'content_block_delta', data: { index: 0, delta: { type: 'input_json_delta', partial_json: '{"pa' } } },
+      { event: 'content_block_delta', data: { index: 0, delta: { type: 'input_json_delta', partial_json: 'th":"a.ts"}' } } },
+      { event: 'content_block_stop', data: { index: 0 } },
+    ];
+    expect(reduceAnthropicToolCalls(events)).toEqual([{ id: 'toolu_1', name: 'readFile', argsJson: '{"path":"a.ts"}' }]);
+  });
+
+  // Parallel tool_use blocks are distinguished by their content-block index; returned in first-seen order.
+  it('keeps parallel calls separate by index', () => {
+    const events: SseEvent[] = [
+      { event: 'content_block_start', data: { index: 0, content_block: { type: 'tool_use', id: 'toolu_a', name: 'a' } } },
+      { event: 'content_block_start', data: { index: 1, content_block: { type: 'tool_use', id: 'toolu_b', name: 'b' } } },
+      { event: 'content_block_delta', data: { index: 1, delta: { type: 'input_json_delta', partial_json: '{"y":2}' } } },
+      { event: 'content_block_delta', data: { index: 0, delta: { type: 'input_json_delta', partial_json: '{"x":1}' } } },
+    ];
+    expect(reduceAnthropicToolCalls(events)).toEqual([
+      { id: 'toolu_a', name: 'a', argsJson: '{"x":1}' },
+      { id: 'toolu_b', name: 'b', argsJson: '{"y":2}' },
+    ]);
+  });
+
+  // A no-argument tool sends no input_json_delta — argsJson stays empty (the consumer maps '' → {}).
+  it('leaves argsJson empty for a tool with no argument deltas', () => {
+    const events: SseEvent[] = [
+      { event: 'content_block_start', data: { index: 0, content_block: { type: 'tool_use', id: 'toolu_9', name: 'noArgs' } } },
+    ];
+    expect(reduceAnthropicToolCalls(events)).toEqual([{ id: 'toolu_9', name: 'noArgs', argsJson: '' }]);
+  });
+
+  // A text block (content_block_start type:text + its text_delta) is not a tool call — ignored.
+  it('ignores text content blocks and text deltas', () => {
+    const events: SseEvent[] = [
+      { event: 'content_block_start', data: { index: 0, content_block: { type: 'text', text: '' } } },
+      { event: 'content_block_delta', data: { index: 0, delta: { type: 'text_delta', text: 'hi' } } },
+    ];
+    expect(reduceAnthropicToolCalls(events)).toEqual([]);
+  });
+
+  it('returns [] for no events', () => {
+    expect(reduceAnthropicToolCalls([])).toEqual([]);
+  });
+});
+
+describe('buildAnthropicMessagesBody — tools', () => {
+  // Agent mode: the converted tools ride on the body and tool_choice defaults to the {type:'auto'} object
+  // (Anthropic's tool_choice is an object, not a string).
+  it('forwards tools with tool_choice {type:auto} by default', () => {
+    const tools = toAnthropicTools([{ name: 'readFile', description: 'd', inputSchema: { type: 'object', properties: {} } }]);
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', tools, messages: [{ role: 'user', content: 'hi' }] }) as any;
+    expect(body.tools).toEqual(tools);
+    expect(body.tool_choice).toEqual({ type: 'auto' });
+  });
+
+  // VS Code's Required tool mode maps to Anthropic's {type:'any'} (must use a tool).
+  it('uses {type:any} when toolChoice is any', () => {
+    const tools = toAnthropicTools([{ name: 'x', description: 'd' }]);
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', tools, toolChoice: 'any', messages: [{ role: 'user', content: 'hi' }] }) as any;
+    expect(body.tool_choice).toEqual({ type: 'any' });
+  });
+
+  // No tools → no tools/tool_choice keys at all (a bare tool_choice with no tools is rejected).
+  it('omits tool fields when there are no tools', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', tools: [], messages: [{ role: 'user', content: 'hi' }] }) as any;
+    expect('tools' in body).toBe(false);
+    expect('tool_choice' in body).toBe(false);
+  });
+
+  // An assistant turn that called a tool becomes a content block array: its text (if any) then a tool_use
+  // block whose `input` is the PARSED argument object (not the JSON string Codex round-trips).
+  it('serializes an assistant tool-call turn to text + tool_use blocks', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'read a.ts' },
+      { role: 'assistant', content: 'sure', toolCalls: [{ id: 'toolu_1', name: 'readFile', argsJson: '{"path":"a.ts"}' }] },
+    ] }) as any;
+    expect(body.messages[1]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'sure' },
+        { type: 'tool_use', id: 'toolu_1', name: 'readFile', input: { path: 'a.ts' } },
+      ],
+    });
+  });
+
+  // A tool-only assistant turn (no text) emits just the tool_use block — Anthropic rejects an empty text block.
+  it('omits the text block for a tool-only assistant turn', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'toolu_1', name: 'x', argsJson: '{}' }] },
+    ] }) as any;
+    expect(body.messages[1]).toEqual({ role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'x', input: {} }] });
+  });
+
+  // A tool result rides on a user turn as a tool_result block, which must come FIRST (before any text).
+  it('serializes a tool-result user turn with the tool_result block first', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'thanks', toolResults: [{ callId: 'toolu_1', content: 'file body' }] },
+    ] }) as any;
+    expect(body.messages[0]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_1', content: 'file body' },
+        { type: 'text', text: 'thanks' },
+      ],
+    });
+  });
+
+  // Malformed argument JSON degrades to {} rather than throwing (a backend can stream partial/bad JSON).
+  it('degrades unparseable tool-call arguments to an empty object', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'assistant', content: '', toolCalls: [{ id: 'toolu_1', name: 'x', argsJson: '{bad' }] },
+    ] }) as any;
+    expect(body.messages[0].content[0].input).toEqual({});
+  });
+
+  // A plain text turn (no tools) still serializes as a bare string — the #29 shape is unchanged, and the
+  // attribution fingerprint still derives from the first user turn's TEXT (the #28 contract).
+  it('keeps plain turns as strings and preserves the fingerprint source', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: '0.19.0', messages: [
+      { role: 'user', content: 'first text' },
+      { role: 'assistant', content: 'ok', toolCalls: [{ id: 'toolu_1', name: 'x', argsJson: '{}' }] },
+    ] }) as any;
+    expect(body.messages[0]).toEqual({ role: 'user', content: 'first text' });
+    expect(body.system[0].text).toBe(anthropicAttribution('first text', '0.19.0'));
+  });
+
+  // A full agent round-trip locks the load-bearing Messages-API adjacency the turns are mapped to preserve:
+  // a plain user turn, then an assistant turn ending in a tool_use block, IMMEDIATELY followed by a user turn
+  // whose content STARTS with the matching tool_result(tool_use_id). Mirrors Codex #15's round-trip test.
+  it('preserves order across a full tool round-trip', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'read a.ts' },
+      { role: 'assistant', content: 'sure', toolCalls: [{ id: 'toolu_1', name: 'readFile', argsJson: '{}' }] },
+      { role: 'user', content: 'thanks', toolResults: [{ callId: 'toolu_1', content: 'file body' }] },
+    ] }) as any;
+    expect(body.messages).toEqual([
+      { role: 'user', content: 'read a.ts' },
+      { role: 'assistant', content: [{ type: 'text', text: 'sure' }, { type: 'tool_use', id: 'toolu_1', name: 'readFile', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'file body' }, { type: 'text', text: 'thanks' }] },
+    ]);
+  });
+
+  // Anthropic's native parallel shape: several tool_use blocks are SIBLINGS inside one assistant turn's
+  // content array (after the optional leading text), not separate turns. (Codex differs — flat function_call
+  // items.) Locks that all calls survive, in order, after the text block.
+  it('serializes multiple parallel tool calls as sibling tool_use blocks in one assistant turn', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'x', toolCalls: [
+        { id: 'toolu_a', name: 'a', argsJson: '{"p":1}' },
+        { id: 'toolu_b', name: 'b', argsJson: '{"q":2}' },
+      ] },
+    ] }) as any;
+    expect(body.messages[1]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'x' },
+        { type: 'tool_use', id: 'toolu_a', name: 'a', input: { p: 1 } },
+        { type: 'tool_use', id: 'toolu_b', name: 'b', input: { q: 2 } },
+      ],
+    });
   });
 });

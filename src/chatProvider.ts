@@ -28,7 +28,7 @@ import OpenAI from 'openai';
 import {
   Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
   buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, toCodexResponsesTools, isCodexProvider, codexModelCaps,
-  isAnthropicProvider, anthropicModelCaps,
+  isAnthropicProvider, anthropicModelCaps, toAnthropicTools,
   type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort, type AnthropicCreds,
 } from './catalog';
 import { codexStream } from './codexClient';
@@ -93,10 +93,11 @@ const toCodexMessages = (messages: readonly vscode.LanguageModelChatRequestMessa
   messages.map(normalizeTurn)
     .map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
-// Native chat turns → Anthropic Messages turns: just role + text. #29 is text-only — images and the tool
-// round-trip (tool_use / tool_result blocks) are slice #30, so they are dropped here for now.
+// Native chat turns → Anthropic Messages turns: role, text, and the agent round-trip — the tool calls a
+// turn made and the tool results it carries (#30). buildAnthropicMessagesBody expands those into tool_use /
+// tool_result content blocks. Images are still dropped here (a separate follow-up, not #30's scope).
 const toAnthropicMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
-  messages.map(normalizeTurn).map((t) => ({ role: t.role, content: t.text }));
+  messages.map(normalizeTurn).map((t) => ({ role: t.role, content: t.text, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
 // ----------------------------- Provider ----------------------------- //
 
@@ -174,15 +175,21 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
     }
 
     // Anthropic speaks the Messages API, not chat completions — stream it through the dedicated client.
-    // #29 is text-only: agent tools are not forwarded (the tool round-trip is slice #30), so this relays
-    // text deltas as text parts. anthropicStream refreshes nothing — current() handed back fresh creds.
+    // Agent tools are forwarded as Anthropic tools (#30); anthropicStream yields text fragments live and the
+    // assembled tool calls at stream end, mapped to text / tool-call parts exactly like the Codex path.
     if (isAnthropicProvider(provider)) {
       const creds = await deps.anthropicCreds();
       if (!creds) return; // only signed-in Anthropic is advertised — rare sign-out race
       const baseUrl = resolveBaseUrl(provider, deps.customBaseUrl());
+      const tools = toAnthropicTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
+      const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'any' : 'auto';
       try {
-        for await (const ev of anthropicStream({ creds, baseUrl, model: modelId, messages: toAnthropicMessages(messages), signal: controller.signal })) {
-          progress.report(new vscode.LanguageModelTextPart(ev.value));
+        for await (const ev of anthropicStream({ creds, baseUrl, model: modelId, messages: toAnthropicMessages(messages), tools, toolChoice, signal: controller.signal })) {
+          if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
+          // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
+          let input: object = {};
+          try { input = ev.call.argsJson ? JSON.parse(ev.call.argsJson) : {}; } catch { /* keep {} */ }
+          progress.report(new vscode.LanguageModelToolCallPart(ev.call.id, ev.call.name, input));
         }
       } catch (err) {
         if (controller.signal.aborted) return; // user cancelled — normal, not a failure

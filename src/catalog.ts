@@ -852,31 +852,78 @@ export const anthropicAttribution = (firstUserMessage: string, version: string):
 
 // One conversation message for the Messages backend. Inquire sends system+user; native chat sends
 // user/assistant. The Messages API carries the system prompt top-level (not as a role), so a 'system'
-// entry here is lifted out by the body builder rather than placed among `messages`.
-export type AnthropicMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+// entry here is lifted out by the body builder rather than placed among `messages`. Agent mode (#30) also
+// carries a turn's tool round-trip: toolCalls on an assistant turn, toolResults on a user turn — kept
+// alongside `content` (the text), mirroring the Codex message shape, and expanded to content blocks below.
+export type AnthropicMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  toolCalls?: { id: string; name: string; argsJson: string }[];
+  toolResults?: { callId: string; content: string }[];
+};
+
+// An Anthropic Messages tool definition. Unlike Codex's strict Responses tools, Anthropic accepts a plain
+// JSON schema as `input_schema` — no additionalProperties:false / required-all-keys closure.
+export type AnthropicTool = { name: string; description: string; input_schema: Record<string, unknown> };
+
+// Map VS Code tool defs to Anthropic tools. The schema rides through verbatim (Anthropic doesn't require
+// strict closure), so this is far simpler than toCodexResponsesTools; a tool with no schema gets an empty
+// object schema so input_schema is always present and valid.
+export const toAnthropicTools = (tools: ToolSpec[]): AnthropicTool[] =>
+  tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: (t.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+  }));
+
+// Parse a tool call's accumulated argument JSON into the object Anthropic's tool_use block expects (Codex's
+// Responses round-trip sends the raw string; Anthropic wants it parsed). Bad/partial JSON degrades to {}.
+const parseToolInput = (argsJson: string): Record<string, unknown> => {
+  try { return argsJson ? JSON.parse(argsJson) : {}; } catch { return {}; }
+};
 
 // Translate a conversation into an Anthropic Messages request body. The system text moves to the top-level
 // `system` block array — Anthropic does NOT take a system role in `messages` — led by the Claude Code
-// attribution block (its fingerprint derived from the first user message, the exact text sent below). Only
-// user/assistant turns stay in `messages`. stream:true is added only for the streaming path. Shared by
-// anthropicInquire (whole-JSON reply) and anthropicStream (SSE), so the request shape is built+tested once.
+// attribution block (its fingerprint derived from the first user turn's TEXT, the #28 contract — so it MUST
+// stay sourced from `content`, never from a tool block). A turn with tool calls/results expands to a content
+// BLOCK array (assistant: text then tool_use; user: tool_result FIRST then text — Anthropic requires that
+// order); a plain turn stays a bare string (the #29 shape). An empty text block is never emitted (Anthropic
+// rejects it), so a tool-only turn is just its tool block. tools ride only when non-empty — a bare
+// tool_choice with no tools is rejected. Shared by anthropicInquire and anthropicStream: one tested shape.
 export const buildAnthropicMessagesBody = (args: {
   model: string; messages: AnthropicMessage[]; maxTokens: number; version: string; stream?: boolean;
+  tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any';
 }) => {
   const wispSystem = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-  const convo = args.messages.filter((m): m is { role: 'user' | 'assistant'; content: string } => m.role !== 'system')
-    .map((m) => ({ role: m.role, content: m.content }));
+  const convo = args.messages.filter((m) => m.role !== 'system');
   const firstUserMessage = convo[0]?.content ?? '';
   const system = [
     { type: 'text' as const, text: anthropicAttribution(firstUserMessage, args.version) },
     ...(wispSystem ? [{ type: 'text' as const, text: wispSystem }] : []),
   ];
+  const messages = convo.map((m) => {
+    if (m.role === 'assistant') {
+      // A plain text turn stays a bare string (the #29 shape); only a tool-call turn expands to blocks.
+      if (!m.toolCalls?.length) return { role: 'assistant' as const, content: m.content };
+      const blocks: unknown[] = [];
+      if (m.content) blocks.push({ type: 'text', text: m.content });
+      for (const tc of m.toolCalls) blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: parseToolInput(tc.argsJson) });
+      return { role: 'assistant' as const, content: blocks };
+    }
+    if (!m.toolResults?.length) return { role: 'user' as const, content: m.content };
+    // tool_result blocks lead so the assistant(tool_use) → tool_result order the API wants holds.
+    const blocks: unknown[] = [];
+    for (const tr of m.toolResults) blocks.push({ type: 'tool_result', tool_use_id: tr.callId, content: tr.content });
+    if (m.content) blocks.push({ type: 'text', text: m.content });
+    return { role: 'user' as const, content: blocks };
+  });
   return {
     model: args.model,
     max_tokens: args.maxTokens,
     system,
-    messages: convo,
+    messages,
     ...(args.stream ? { stream: true as const } : {}),
+    ...(args.tools && args.tools.length ? { tools: args.tools, tool_choice: { type: args.toolChoice ?? 'auto' } } : {}),
   };
 };
 
@@ -899,6 +946,31 @@ export const reduceAnthropicTextEvents = (events: SseEvent[]): string => {
     text += anthropicTextDelta(ev);
   }
   return text;
+};
+
+// Reassemble streamed Messages tool_use blocks into whole tool calls — the Anthropic analogue of
+// reduceResponsesToolCalls. A tool_use block is announced by content_block_start (carrying the toolu_ id +
+// name) and its arguments stream as content_block_delta(input_json_delta) partial_json fragments. Keyed by
+// the content-block `index` (Anthropic's per-block key — Codex keys by item id instead). The toolu_ id is the
+// round-trip id that becomes the matching tool_result's tool_use_id. Returned in first-seen order; a block
+// that never announced a name is dropped (it can't be invoked). Reuses AssembledToolCall (id/name/argsJson)
+// — a no-argument tool simply leaves argsJson '' (the consumer maps '' → {}).
+export const reduceAnthropicToolCalls = (events: SseEvent[]): AssembledToolCall[] => {
+  const byIndex = new Map<number, AssembledToolCall>();
+  for (const ev of events) {
+    if (ev.event === 'content_block_start' && ev.data?.content_block?.type === 'tool_use') {
+      const cb = ev.data.content_block;
+      const call = byIndex.get(ev.data.index) ?? { id: '', name: '', argsJson: '' };
+      if (typeof cb.id === 'string') call.id = cb.id;
+      if (typeof cb.name === 'string') call.name = cb.name;
+      byIndex.set(ev.data.index, call);
+    } else if (ev.event === 'content_block_delta' && ev.data?.delta?.type === 'input_json_delta') {
+      const call = byIndex.get(ev.data.index) ?? { id: '', name: '', argsJson: '' };
+      if (typeof ev.data.delta.partial_json === 'string') call.argsJson += ev.data.delta.partial_json;
+      byIndex.set(ev.data.index, call);
+    }
+  }
+  return [...byIndex.values()].filter((c) => c.name);
 };
 
 // Real Claude model windows — the OAuth Messages path has no models.dev catalogKey, so without this the
