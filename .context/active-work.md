@@ -1,68 +1,64 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-21
+updated: 2026-06-22
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-21 by Opus 4.8._
-_At branch: `feat/codex-effort` — slice #24 committed (`aa1f5ad`); this session commits **slice #25**.
-`main` = `ec60e62`. Also uncommitted on the branch: a pre-existing `CLAUDE.md` edit (ecosystem-KB /
-handoff / trace sections — NOT this work), deliberately left out of both commits; decide its fate
-separately._
+_Last updated: 2026-06-22 by Opus 4.8 (auto)._
+_At commit: `5f6712b` (on `main`; PRD #23 already shipped via #26 + v1.2.0). `CLAUDE.md` still
+uncommitted — pre-existing ecosystem-KB/handoff/trace edit, unrelated; decide its fate separately._
 
 ## Current focus
-**PRD #23 (Codex Effort control) is COMPLETE** — both slices built + verified on `feat/codex-effort`.
-- **#24** — a side-panel **Effort** knob (`low`/`medium`/`high`/`xhigh`) for the Codex Provider replaces
-  the hardcoded `medium` and governs **every** Codex call (Inquire + chat) via one global value.
-- **#25** — the model-picker label now mirrors that Effort (`Codex — gpt-5.3-codex · high`).
-
-**Next: ship.** `feat/codex-effort` (#24 + #25) → PR to `main` via **`/preset ship`**.
+**New feature planned: the Anthropic OAuth Provider.** Let a Claude.ai (Pro/Max) subscriber sign in to
+Wisp over OAuth and drive Claude models through native chat / Agent / Inquire — a third **Provider kind**
+alongside the API-key and Codex kinds. This session did the investigation + funnel only (no code):
+**PRD #27** created and split into slices **#28 → #29 → #30**. xAI deferred to a future PRD (user has no
+xAI subscription).
 
 ## State
-- **Slice #25 — DONE (committing this session).** `buildChatModelInfos` appends ` · <effort>` to a Codex
-  row's name, gated by `isCodexProvider(p) && codexReasoning(model)` (reasoning rows only; spark/gpt-4.x
-  and non-Codex rows get nothing). New optional `state.effort`, fed by `deps.codexEffort()` at the
-  `chatProvider.ts:~116` call site. Raw lowercase token, matching the panel `<select>`. **`npm test`
-  139 → 141** (+2 tests: reasoning row suffix, spark row no-suffix), tsc+webview clean, **F5 PASSED**
-  (picker shows the suffix on a Codex reasoning row).
-- **Slice #24 — DONE, committed `aa1f5ad`.** `codexReasoning(model, effort)`; `CodexEffort` type +
-  `DEFAULT_EFFORT='medium'`; `wisp.effort` globalState (`activeEffort`/`setEffort`); Codex-gated panel
-  `<select>`. One global value, threaded through the `codexResponsesRequest` chokepoint.
-- **No existing test broke** — the only Codex `buildChatModelInfos` test asserts `capabilities`, not
-  `name`, so the suffix was purely additive (the prior handoff feared otherwise; it was wrong).
-- **Blocked:** Marketplace publish still pending a real `publisher` + Azure DevOps PAT (user creds).
+- **Done this session (planning):** verified investigation of openclaude's Anthropic + xAI OAuth, written
+  to **[[oauth-recon]]** (the design source of truth). Created **PRD #27** + slices **#28** (tracer:
+  sign-in + one Inquire), **#29** (native chat text streaming), **#30** (tool-calling parity). All on
+  `EstarinAzx/Wisp`.
+- **In flight:** nothing in code yet. Next action is implementing slice **#28**.
+- **Blocked:** none for #28. (Anthropic ToS/client_id-reuse risk was considered and **accepted** — it's
+  the intended "subscription-as-a-model" moat; see [[decisions]] 2026-06-22.)
 
 ## Pick up here
-1. **Ship PRD #23** — **`/preset ship`** opens a PR on `feat/codex-effort` (#24 + #25) → `main`.
-2. Before any F5: uninstall `local.wisp` (the old VSIX collides with the dev build — stale panel). See
-   [[gotchas]].
+1. **Implement slice #28** — `gh issue view 28 --comments`. Build `src/anthropicAuth.ts` (mirror
+   `src/codexAuth.ts`: PKCE S256 + loopback + SecretStorage slot `wisp.anthropicAuth` + refresh w/ 5-min
+   skew + `{}` tombstone) and a minimal `src/anthropicClient.ts` Messages call; wire `kind:'anthropic-oauth'`
+   into `catalog.ts` / `extension.ts` / panel / `package.json`; route Inquire to it. Constants in [[oauth-recon]] §1.
+2. **TDD the pure logic** in `catalog.ts`-style tests (PKCE/state, expiry+refresh boundary, tombstone) —
+   prior art `codex.test.ts`.
+3. Before any F5: uninstall `local.wisp` (old VSIX collides with the dev build — stale panel). See [[gotchas]].
+4. **#28 verification is HITL** — needs your real Claude.ai account + browser for the OAuth round-trip.
 
 ## Skills for next session
-- `/preset ship` — push `feat/codex-effort` and open the PR (#24 + #25).
+- superpowers:test-driven-development — the two new deep modules' pure logic wants a red-green loop.
+- /preset scope — to enter the work loop on #28 (restate, plan files, go/no-go).
 
 ## Open questions
-- Carried over (latent): replayed `function_call` items send `call_id` only (add a derived `fc_…` `id`
-  only if a multi-turn round-trip 400s); `codexModelCaps` vision is blanket-`true`. See [[gotchas]].
-- **`xhigh` × model pairing:** one global effort, no per-model gating — `xhigh` on an older
-  `gpt-5`/`o3` may 400 (only codex-max honors it). User's pairing responsibility, by design (PRD "set it once").
-- **`CLAUDE.md`** is uncommitted (pre-existing ecosystem-KB/handoff/trace edit, unrelated to PRD #23) —
-  decide separately whether it belongs in this branch or its own commit.
+- **Dispatch-registry refactor** is deliberately deferred (only 2 OAuth kinds today). Revisit if/when xAI
+  lands and a 3rd kind makes the copy-pasted `isCodexProvider`-style branches worth generalizing.
+- **`NATIVE_CLIENT_ATTESTATION`** is a dormant Anthropic kill-switch Wisp (Node, no Bun/Zig) can't
+  reproduce. Currently unenforced; if it activates, the Anthropic path breaks. Known ceiling, not a blocker.
 
 ## Recent context
-- **#25 label decision:** suffix only when `codexReasoning(model)` is truthy — reusing that exact gate
-  makes label-honesty == reasoning-honesty for free; no separate "is this row reasoning?" check.
-- **No live-refresh event:** the picker re-calls `provideLanguageModelChatInformation` on open
-  (chatProvider is stateless; confirmed no `onDidChange…` event in the finalized 1.104 API) — so the
-  label updates on next picker open, no event wiring needed.
-- **Dev-environment dup trap (carried):** the old installed VSIX (`local.wisp@1.1.0`) + the F5 dev build
-  (`EsarinAzx.wisp`) both contribute `wisp.*` → "already registered" warnings + a stale panel. Uninstall
-  `local.wisp` before F5. See [[gotchas]].
+- **openclaude split cleanly:** Anthropic OAuth = `services/oauth/*` + `constants/oauth.ts` (Messages-API
+  inference, `oauth-2025-04-20` beta); xAI = `services/api/xaiOAuth*` (OpenAI-compatible, OAuth2+OIDC at
+  `auth.x.ai`). Both mirror Wisp's existing Codex template.
+- **No system-prompt spoof needed** — openclaude ships an "OpenClaude" identity and Anthropic OAuth still
+  serves; recognition is token + client_id + `claude-code/<ver>` UA + the beta + billing header.
+- **Anthropic is NOT OpenAI-compatible** — needs a bespoke Messages-API adapter (the analogue of Codex's
+  Responses adapter). This is the genuinely new engineering, in slice #29's client work.
+- Full per-provider porting map, endpoints, scopes, and risks live in [[oauth-recon]].
 
 ## Related
 - [[overview]]
-- [[decisions]]
-- [[gotchas]]
-- [[api]]
+- [[oauth-recon]] — the investigation + design source of truth for this feature
+- [[decisions]] — 2026-06-22 Anthropic-OAuth scope/architecture call
+- [[gotchas]] — F5 dup-extension trap; Codex contract facts the new provider parallels
