@@ -890,9 +890,33 @@ const parseToolInput = (argsJson: string): Record<string, unknown> => {
 // order); a plain turn stays a bare string (the #29 shape). An empty text block is never emitted (Anthropic
 // rejects it), so a tool-only turn is just its tool block. tools ride only when non-empty — a bare
 // tool_choice with no tools is rejected. Shared by anthropicInquire and anthropicStream: one tested shape.
+// ----------------------------- Thinking / effort (slice #31) ----------------------------- //
+
+// Which Claude models accept the thinking+effort body fields. Mirrors openclaude's modelSupportsEffort
+// substring set — Opus 4.5-4.8 and Sonnet 4.6 take them; Haiku and older variants 400, so omit there.
+const modelSupportsAnthropicEffort = (model: string): boolean => {
+  const m = model.toLowerCase();
+  return /opus-4-[5-8]/.test(m) || m.includes('sonnet-4-6');
+};
+
+// xhigh is the one effort level not universally accepted — only Opus 4.7/4.8 take it (openclaude
+// modelSupportsXHighEffort). Other effort-capable models (Sonnet 4.6, Opus 4.5/4.6) 400 on it.
+const modelSupportsAnthropicXHigh = (model: string): boolean => /opus-4-[78]/.test(model.toLowerCase());
+
+// The thinking/effort fragment to spread into a Messages body, or {} when it must be omitted. Effort rides
+// output_config.effort (NOT a top-level field, NOT thinking.budget_tokens — both 400 on Opus 4.7+) behind
+// the effort-2025-11-24 beta header; adaptive thinking carries no budget. Omitted when no effort is threaded
+// (keeps the pre-#31 body byte-identical) or the model can't take it. xhigh clamps to high on models that
+// reject it (the panel offers xhigh for every effort-aware Provider). 'max' deferred (not a panel option).
+export const anthropicThinkingEffort = (model: string, effort?: CodexEffort): { thinking?: { type: 'adaptive' }; output_config?: { effort: CodexEffort } } => {
+  if (!effort || !modelSupportsAnthropicEffort(model)) return {};
+  const level = effort === 'xhigh' && !modelSupportsAnthropicXHigh(model) ? 'high' : effort;
+  return { thinking: { type: 'adaptive' }, output_config: { effort: level } };
+};
+
 export const buildAnthropicMessagesBody = (args: {
   model: string; messages: AnthropicMessage[]; maxTokens: number; version: string; stream?: boolean;
-  tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any';
+  tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; effort?: CodexEffort;
 }) => {
   const wispSystem = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
   const convo = args.messages.filter((m) => m.role !== 'system');
@@ -924,6 +948,7 @@ export const buildAnthropicMessagesBody = (args: {
     messages,
     ...(args.stream ? { stream: true as const } : {}),
     ...(args.tools && args.tools.length ? { tools: args.tools, tool_choice: { type: args.toolChoice ?? 'auto' } } : {}),
+    ...anthropicThinkingEffort(args.model, args.effort),
   };
 };
 

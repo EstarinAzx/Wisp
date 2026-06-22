@@ -7,7 +7,7 @@ import {
   base64url, codeVerifier, codeChallenge, oauthState,
   anthropicFingerprint, anthropicAttribution,
   buildAnthropicMessagesBody, reduceAnthropicTextEvents, anthropicModelCaps,
-  toAnthropicTools, reduceAnthropicToolCalls,
+  toAnthropicTools, reduceAnthropicToolCalls, anthropicThinkingEffort,
   type Provider, type SseEvent,
 } from './catalog';
 import { anthropicMessagesHeaders } from './anthropicClient';
@@ -186,6 +186,66 @@ describe('buildAnthropicMessagesBody', () => {
   });
 });
 
+describe('anthropicThinkingEffort', () => {
+  // Effort-capable models (Opus 4.x / Sonnet 4.6) get adaptive thinking + the level on output_config.effort
+  // (NOT a top-level field, NOT budget_tokens — both 400 on Opus 4.7+). Mirrors openclaude's wire contract.
+  it('emits adaptive thinking + output_config.effort for an effort-capable model', () => {
+    expect(anthropicThinkingEffort('claude-opus-4-8', 'high')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    });
+  });
+
+  // Haiku / older variants reject thinking+effort (400 on the wire) — send neither.
+  it('emits neither field for a model that does not support effort', () => {
+    expect(anthropicThinkingEffort('claude-haiku-4-5', 'high')).toEqual({});
+  });
+
+  // No effort selected → backward-compatible empty: keeps the pre-#31 body byte-identical.
+  it('emits neither field when no effort is given', () => {
+    expect(anthropicThinkingEffort('claude-opus-4-8', undefined)).toEqual({});
+  });
+
+  // xhigh is opus-4-7/4-8 only; the panel offers it for every effort-aware Provider, so a Sonnet pick must
+  // clamp to high (mirrors openclaude) — sending xhigh to sonnet-4-6 is a wire 400.
+  it('clamps xhigh to high on a model that does not support it', () => {
+    expect(anthropicThinkingEffort('claude-sonnet-4-6', 'xhigh')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    });
+  });
+
+  it('keeps xhigh on a model that supports it', () => {
+    expect(anthropicThinkingEffort('claude-opus-4-8', 'xhigh')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'xhigh' },
+    });
+  });
+});
+
+describe('buildAnthropicMessagesBody — thinking/effort', () => {
+  // The threaded effort rides into the body as adaptive thinking + output_config.effort for a capable model.
+  it('spreads adaptive thinking + output_config.effort for an effort-capable model', () => {
+    const body = buildAnthropicMessagesBody({ model: 'claude-opus-4-8', maxTokens: 1, version: 'v', effort: 'low', messages: [{ role: 'user', content: 'hi' }] }) as any;
+    expect(body.thinking).toEqual({ type: 'adaptive' });
+    expect(body.output_config).toEqual({ effort: 'low' });
+  });
+
+  // A non-effort model drops both fields even when an effort is threaded — avoids the 400.
+  it('omits thinking/output_config for a non-effort model', () => {
+    const body = buildAnthropicMessagesBody({ model: 'claude-haiku-4-5', maxTokens: 1, version: 'v', effort: 'high', messages: [{ role: 'user', content: 'hi' }] }) as any;
+    expect('thinking' in body).toBe(false);
+    expect('output_config' in body).toBe(false);
+  });
+
+  // No effort threaded → body stays the pre-#31 shape (no thinking, no output_config).
+  it('omits thinking/output_config when no effort is threaded', () => {
+    const body = buildAnthropicMessagesBody({ model: 'claude-opus-4-8', maxTokens: 1, version: 'v', messages: [{ role: 'user', content: 'hi' }] }) as any;
+    expect('thinking' in body).toBe(false);
+    expect('output_config' in body).toBe(false);
+  });
+});
+
 describe('reduceAnthropicTextEvents', () => {
   // The streaming shape: answer text arrives as a run of content_block_delta events whose delta is a
   // text_delta — concatenate them in order. anthropicStream yields the same fragments live.
@@ -253,6 +313,12 @@ describe('anthropicMessagesHeaders', () => {
     expect(h['anthropic-version']).toBe('2023-06-01');
     expect(h['User-Agent']).toMatch(/^claude-cli\//);
     expect(h['Authorization']).toBe('Bearer tok');
+  });
+
+  // The effort-2025-11-24 beta gates the API's parsing of output_config.effort — without it the level is
+  // silently dropped. Advertised on every request (harmless when the body omits output_config).
+  it('advertises the effort beta so output_config.effort is honored', () => {
+    expect(anthropicMessagesHeaders('tok')['anthropic-beta']).toContain('effort-2025-11-24');
   });
 
   // The streaming request must accept an event stream; the non-streaming (Inquire) request must not.

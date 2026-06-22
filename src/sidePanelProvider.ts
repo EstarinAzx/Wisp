@@ -35,7 +35,7 @@ export type PanelState = {
   kind?: 'openai-chat' | 'codex' | 'anthropic-oauth'; // the OAuth kinds swap the API-key field for sign-in/out
   signedIn?: boolean; // OAuth kinds only: whether a token bundle is present
   modelOptions?: string[]; // OAuth kinds only: curated model ids for the dropdown (no live /models route)
-  effort?: 'low' | 'medium' | 'high' | 'xhigh'; // Codex only: the reasoning-effort knob (governs every Codex call)
+  effort?: 'low' | 'medium' | 'high' | 'xhigh'; // Codex + Anthropic (#31): the reasoning-effort knob (governs every call)
 };
 
 // Shared with extension.ts so the no-key failure is recognizable as webview-safe text.

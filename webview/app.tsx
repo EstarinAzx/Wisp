@@ -282,10 +282,11 @@ export const App = () => {
         {modelsError && <p class="text-[var(--vscode-errorForeground)]">{modelsError}</p>}
       </section>
 
-      {/* ------------------------------ Effort (Codex only) ------------------------------ */}
-      {/* Reasoning depth for the Codex Provider — one value governing every Codex call (Inquire + chat).
-          Inert for non-reasoning Codex models (spark / gpt-4.x), which ignore it. */}
-      {state.kind === 'codex' && (
+      {/* ------------------------------ Effort ------------------------------ */}
+      {/* Reasoning depth for the effort-aware OAuth Providers — Codex and Anthropic (#31) — one value
+          governing every call (Inquire + chat). Shown whenever the host populates effort; inert for
+          models that ignore it (Codex spark/gpt-4.x, Claude Haiku). */}
+      {state.effort !== undefined && (
         <section class="flex flex-col gap-1.5">
           <h2 class="section-title">Effort</h2>
           <select

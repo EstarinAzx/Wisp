@@ -16,10 +16,10 @@
  *     fragments as they arrive so the native chat picker renders tokens live.
  */
 
-import { AnthropicCreds, buildAnthropicMessagesBody, anthropicTextDelta, reduceAnthropicToolCalls, parseSseBlock, type AnthropicMessage, type AnthropicTool, type AssembledToolCall } from './catalog';
+import { AnthropicCreds, buildAnthropicMessagesBody, anthropicTextDelta, reduceAnthropicToolCalls, parseSseBlock, type AnthropicMessage, type AnthropicTool, type AssembledToolCall, type CodexEffort } from './catalog';
 import { sseBlocks } from './codexClient';
 
-type AnthropicRequestArgs = { creds: AnthropicCreds; baseUrl: string; model: string; messages: AnthropicMessage[]; tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; signal?: AbortSignal };
+type AnthropicRequestArgs = { creds: AnthropicCreds; baseUrl: string; model: string; messages: AnthropicMessage[]; tools?: AnthropicTool[]; toolChoice?: 'auto' | 'any'; effort?: CodexEffort; signal?: AbortSignal };
 
 // What anthropicStream yields — an answer-text fragment, or a fully-assembled tool call (#30 agent mode).
 // The native-chat consumer maps these to LanguageModelTextPart / LanguageModelToolCallPart.
@@ -39,7 +39,9 @@ const ANTHROPIC_MAX_TOKENS = 16_000;
 // accepted today (openclaude serves with it). The identity in the system prompt is NOT gated, so Wisp
 // keeps its own prompt. The native-client attestation (cch token) can't be reproduced from Node, but is
 // unenforced today.
-const ANTHROPIC_BETA = 'claude-code-20250219,oauth-2025-04-20';
+// effort-2025-11-24 gates the API's parsing of output_config.effort (slice #31) — without it the level is
+// silently dropped. Advertised on every request; harmless when the body omits output_config (e.g. Haiku).
+const ANTHROPIC_BETA = 'claude-code-20250219,oauth-2025-04-20,effort-2025-11-24';
 // The attribution fingerprint (catalog) embeds this version, and the User-Agent advertises it — they MUST
 // match (the backend ties the cc_version to the claude-cli UA). This exact string is accepted today.
 const CLAUDE_CODE_VERSION = '0.19.0';
@@ -67,7 +69,7 @@ const anthropicMessagesRequest = async (args: AnthropicRequestArgs & { stream?: 
   const res = await fetch(`${args.baseUrl}/v1/messages`, {
     method: 'POST',
     headers: anthropicMessagesHeaders(bearer, args.stream),
-    body: JSON.stringify(buildAnthropicMessagesBody({ model: args.model, messages: args.messages, maxTokens: ANTHROPIC_MAX_TOKENS, version: CLAUDE_CODE_VERSION, stream: args.stream, tools: args.tools, toolChoice: args.toolChoice })),
+    body: JSON.stringify(buildAnthropicMessagesBody({ model: args.model, messages: args.messages, maxTokens: ANTHROPIC_MAX_TOKENS, version: CLAUDE_CODE_VERSION, stream: args.stream, tools: args.tools, toolChoice: args.toolChoice, effort: args.effort })),
     signal: args.signal,
   });
   if (!res.ok) {

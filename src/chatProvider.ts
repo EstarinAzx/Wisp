@@ -49,7 +49,7 @@ export type ChatProviderDeps = {
   // (so a not-signed-in Codex stays hidden) and its refreshed OAuth creds for the streaming Responses call.
   codexSignedIn: () => Promise<boolean>;
   codexCreds: () => Promise<CodexCreds | undefined>;
-  codexEffort: () => CodexEffort;                   // the panel's Codex reasoning Effort (same value Inquire uses)
+  effort: () => CodexEffort;                        // the panel's reasoning Effort — shared by Codex + Anthropic (same value Inquire uses)
   // Anthropic is the same "usable when signed in" shape as Codex (no API key): the signed-in flag gates
   // the row, current() returns the refreshed OAuth bundle for the streaming Messages call.
   anthropicSignedIn: () => Promise<boolean>;
@@ -134,7 +134,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       modelMap: deps.modelMap(),
       customBaseUrl: deps.customBaseUrl(),
       caps,
-      effort: deps.codexEffort(),
+      effort: deps.effort(),
     });
   },
 
@@ -159,7 +159,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       const tools = toCodexResponsesTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
       const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
       try {
-        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), effort: deps.codexEffort(), tools, toolChoice, signal: controller.signal })) {
+        for await (const ev of codexStream({ creds, baseUrl, model: modelId, messages: toCodexMessages(messages), effort: deps.effort(), tools, toolChoice, signal: controller.signal })) {
           if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
           // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
           let input: object = {};
@@ -184,7 +184,7 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       const tools = toAnthropicTools((options.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
       const toolChoice = options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'any' : 'auto';
       try {
-        for await (const ev of anthropicStream({ creds, baseUrl, model: modelId, messages: toAnthropicMessages(messages), tools, toolChoice, signal: controller.signal })) {
+        for await (const ev of anthropicStream({ creds, baseUrl, model: modelId, messages: toAnthropicMessages(messages), effort: deps.effort(), tools, toolChoice, signal: controller.signal })) {
           if (ev.type === 'text') { progress.report(new vscode.LanguageModelTextPart(ev.value)); continue; }
           // A backend can emit malformed argument JSON — degrade to {} rather than abort the whole turn.
           let input: object = {};

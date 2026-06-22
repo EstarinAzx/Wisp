@@ -315,8 +315,9 @@ const getState = async (): Promise<PanelState> => {
     signedIn,
     // The OAuth Providers have no /models route — offer the curated list instead of a live fetch.
     modelOptions: isCodexProvider(p) ? CODEX_MODELS : isAnthropicProvider(p) ? ANTHROPIC_MODELS : undefined,
-    // Codex only: the reasoning-effort knob's current value (drives the panel's Effort select).
-    effort: isCodexProvider(p) ? activeEffort() : undefined,
+    // The reasoning-effort knob's current value (drives the panel's Effort select). Shared by the two
+    // effort-aware OAuth Providers — Codex and Anthropic (#31); every other Provider leaves it undefined.
+    effort: isCodexProvider(p) || isAnthropicProvider(p) ? activeEffort() : undefined,
   };
 };
 
@@ -601,7 +602,7 @@ const inquire = async (): Promise<void> => {
         if (codex) {
           reply = await codexInquire({ creds: creds!, baseUrl: activeBaseUrl(), model, messages, effort: activeEffort(), signal: controller.signal });
         } else if (anthropic) {
-          reply = await anthropicInquire({ creds: anthropicCreds!, baseUrl: activeBaseUrl(), model, messages, signal: controller.signal });
+          reply = await anthropicInquire({ creds: anthropicCreds!, baseUrl: activeBaseUrl(), model, messages, effort: activeEffort(), signal: controller.signal });
         } else {
           const maxTokens = cfg().get<number>('maxTokens') ?? 0;
           const res = await client!.chat.completions.create(
@@ -742,8 +743,9 @@ export const activate = (context: vscode.ExtensionContext): void => {
       // refreshed OAuth bundle for the streaming Responses call.
       codexSignedIn: () => codexAuth.isSignedIn(),
       codexCreds: () => codexAuth.current(),
-      // The Codex reasoning Effort governs the chat path too — one source of truth with Inquire.
-      codexEffort: () => activeEffort(),
+      // The reasoning Effort governs the chat path too — one source of truth with Inquire, shared by
+      // Codex and Anthropic (#31).
+      effort: () => activeEffort(),
       // Anthropic chat surface: same shape as Codex — signed-in flag gates the row, current() returns the
       // refreshed OAuth bundle for the streaming Messages call.
       anthropicSignedIn: () => anthropicAuth.isSignedIn(),
