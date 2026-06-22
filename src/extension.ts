@@ -744,6 +744,10 @@ export const activate = (context: vscode.ExtensionContext): void => {
       codexCreds: () => codexAuth.current(),
       // The Codex reasoning Effort governs the chat path too — one source of truth with Inquire.
       codexEffort: () => activeEffort(),
+      // Anthropic chat surface: same shape as Codex — signed-in flag gates the row, current() returns the
+      // refreshed OAuth bundle for the streaming Messages call.
+      anthropicSignedIn: () => anthropicAuth.isSignedIn(),
+      anthropicCreds: () => anthropicAuth.current(),
       log: (m) => output.appendLine(m),
     }),
     // Keep derived state in sync when settings change out from under us.

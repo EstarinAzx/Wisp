@@ -8,63 +8,62 @@ tags: [context, active-work]
 # Active Work
 
 _Last updated: 2026-06-23 by Opus 4.8 (auto)._
-_At commit: `b87af33` + uncommitted slice-#28 work on branch `feat/anthropic-oauth` (off `main`).
-`CLAUDE.md` still uncommitted — pre-existing ecosystem-KB/handoff/trace edit, unrelated; NOT part of #28,
-decide separately._
+_At commit: `b6ae9b2` (#28 merged) + uncommitted slice-#29 work on branch `feat/anthropic-oauth`.
+`CLAUDE.md` still uncommitted — pre-existing, unrelated; NOT part of #29, decide separately._
 
 ## Current focus
-**Anthropic OAuth Provider — slice #28 (tracer) is DONE and HITL-verified.** A Claude.ai (Pro/Max)
-subscriber signs in to Wisp over OAuth and runs one **Inquire** edit through Claude on the Anthropic
-**Messages API** — the third Provider **kind** (`kind:'anthropic-oauth'`) alongside API-key and Codex.
-Next is slice **#29** (native chat streaming).
+**Anthropic OAuth Provider — slice #29 (native chat, text streaming) is DONE and HITL-verified.** Signed
+in, Claude models appear in the native chat / Ctrl+I picker and a turn streams text token-by-token off the
+Messages SSE. Third Provider kind (`kind:'anthropic-oauth'`) now works on BOTH surfaces (Inquire + chat).
+Next is slice **#30** (Anthropic tool-calling parity / Agent mode).
 
 ## State
-- **Done this session (#28):** new `src/anthropicAuth.ts` (PKCE S256 + CSRF state, OS-assigned loopback,
-  slot `wisp.anthropicAuth`, JSON token exchange, scope-omitting refresh w/ 5-min skew, `{}` tombstone) +
-  `src/anthropicClient.ts` (Messages `POST /v1/messages`, non-streaming, text-block extract). Pure cores +
-  the **client fingerprint** in `catalog.ts` (TDD, `anthropic.test.ts` 18 tests; `npm test` **159/159**).
-  Wired into `extension.ts` (row, singleton, getState, sign-in/out commands, Inquire dispatch),
-  `sidePanelProvider.ts` + `webview/app.tsx` (one sign-in block generalized to both OAuth kinds),
-  `package.json` (commands + `anthropic` enum). tsc + webview + vite clean. **F5: OAuth sign-in + one
-  Inquire edit PASSED.**
-- **In flight:** nothing mid-edit. Slice #28 is complete; not yet committed (branch ready, see Pick up).
-- **Blocked:** none for #29.
+- **Done this session (#29):** `buildAnthropicMessagesBody` (one tested body builder; `anthropicInquire`
+  refactored onto it), `anthropicTextDelta`/`reduceAnthropicTextEvents` (Messages SSE→text), `anthropicModelCaps`
+  (Opus/Sonnet **1M**, Haiku 200K — see [[decisions]] 2026-06-23), `SseEvent`/`AnthropicMessage` in `catalog.ts`;
+  `sseBlocks` exported from `codexClient.ts`; `anthropicMessagesHeaders` + `anthropicStream` in `anthropicClient.ts`;
+  `chatProvider.ts` deps/usability/caps/streaming branch + `toAnthropicMessages`; `extension.ts` two getters.
+  11 new tests, **`npm test` 170/170**; `tsc` (root + webview) + vite clean. **F5 streaming chat PASSED.**
+- **In flight:** nothing mid-edit. #29 complete, **not yet committed** (branch ready — see Pick up).
+- **Blocked:** none for #30.
 
 ## Pick up here
-1. **Commit #28 first** (if `/preset wrap-up` didn't finish it): on branch `feat/anthropic-oauth`, stage the
-   `src/anthropic*` files + the `catalog.ts`/`extension.ts`/`sidePanelProvider.ts`/`webview/app.tsx`/
-   `package.json` edits + `.context/`, conventional commit. Do NOT stage `CLAUDE.md`. Then `/preset ship` → PR.
-2. **Implement slice #29** — `gh issue view 29 --comments`. Native **chat streaming** for Anthropic: an
-   `anthropicStream` async-generator over the Messages **SSE** (`content_block_delta` → text), wire
-   `isAnthropicProvider` into `chatProvider.ts` (advertise-when-signed-in like Codex, caps, a bespoke
-   Messages adapter — NOT the OpenAI chat client). Mirror `codexStream`/`codexClient` structure.
-3. **#29 verification is HITL** — needs the real Claude.ai account + the Ctrl+I/chat picker.
+1. **Commit #29 first** (if `/preset wrap-up` didn't finish it): stage `src/catalog.ts`, `src/anthropicClient.ts`,
+   `src/codexClient.ts`, `src/chatProvider.ts`, `src/extension.ts`, `src/anthropic.test.ts`, `.context/`.
+   Do NOT stage `CLAUDE.md`. Conventional commit, then `/preset ship` → PR.
+2. **Slice #30 — Anthropic tool-calling parity:** `gh issue view 30 --comments`. Map Anthropic `tool_use` /
+   `tool_result` content blocks ↔ VS Code LM tool calls in BOTH directions; extend the SSE reducer to surface
+   tool-call blocks (not just text — `tool_use` block + `input_json_delta` args), forward `options.tools` in
+   `chatProvider`'s Anthropic branch, round-trip results. Mirror Codex's #15 (`reduceResponsesToolCalls` /
+   `toCodexResponsesTools` / the `function_call` round-trip). TDD the tool-call mapping. **HITL verify.**
+3. **Two follow-ups (own slices, not #30):** (a) **thinking/effort parity** — Claude chat runs thinking-OFF;
+   add `thinking`+`output_config.effort` like Codex's Effort knob, but FIRST probe the subscription path
+   accepts them without a synthetic-429 (see [[decisions]] 2026-06-23). (b) **subscription context ceiling** —
+   verify whether the OAuth Messages path actually grants 1M; if it caps lower, drop opus/sonnet `contextInput`.
 
 ## Skills for next session
-- superpowers:test-driven-development — the SSE reducer's pure logic wants a red-green loop (prior art
-  `codex.test.ts` reduceResponsesTextEvents).
-- /preset scope — to enter #29 (restate, plan files, go/no-go).
+- superpowers:test-driven-development — #30's tool-call mapping (both directions) wants a red-green loop;
+  prior art is Codex's `reduceResponsesToolCalls` tests in `codex.test.ts`.
+- /preset scope — to enter #30 (restate, plan files, go/no-go).
 
 ## Open questions
-- **Model `claude-opus-4-8` on the subscription path** — it WORKED for #28's Inquire, so opus-4-8 is served
-  on the Claude.ai OAuth path (openclaude defaults subscribers to opus-4-6/sonnet-4-6, but 4-8 is accepted).
-  No action needed; noted in case a future model 429s (swap to `claude-sonnet-4-6`).
-- **Dispatch-registry refactor** still deferred (only 2 OAuth kinds). Revisit if/when xAI lands a 3rd kind.
-- **`NATIVE_CLIENT_ATTESTATION`** (the `cch` token) still a dormant kill-switch Wisp (Node) can't reproduce;
-  unenforced today — #28 works without it. Known ceiling, not a blocker.
+- **Does the subscription OAuth Messages path accept `thinking`/`output_config.effort`** without tripping the
+  #28 synthetic-429 fingerprint contract? Unverified — blocks the thinking/effort follow-up.
+- **Subscription context ceiling** — is 1M actually granted on the Claude.ai OAuth path, or does it cap (e.g.
+  ~200K)? Caps currently advertise the model-spec 1M; revisit if a long-context chat 4xx/413s.
 
 ## Recent context
-- **The 429 saga (now resolved) defines the Anthropic request contract.** OAuth sign-in worked first try,
-  but the first Inquire 429'd with a *synthetic* `rate_limit_error` (no `anthropic-ratelimit-*` headers,
-  generic `"message":"Error"` body — the tell). Root cause: the subscription Messages backend validates a
-  per-request **client fingerprint** and three recognition signals, none of which the bare request carried.
-  Fixed in `anthropicClient.ts` — see [[decisions]] 2026-06-23 and [[gotchas]] "Anthropic OAuth: synthetic
-  429 …". This **sharpens** the recon's abstracted "recognition = … billing header" ([[oauth-recon]] §5e).
-- openclaude remains the verified reference (`D:/.claude/claude projects/openclaude`); the fingerprint
-  recipe + headers were extracted from its actual Messages request code.
+- **1M vs 200K caps was a deliberated call** — chose model-spec 1M (Opus/Sonnet) over a conservative 200K
+  floor: the floor guards only an unverified+avoidable over-pack case, while under-advertising certainly hurts
+  the OAuth-moat feature. See [[decisions]] 2026-06-23.
+- **#29 reused, didn't duplicate:** `sseBlocks` + `parseSseBlock` are provider-agnostic (Codex + Anthropic both
+  flow through them); only event names differ. `anthropicInquire` (#28, non-streaming JSON) now shares the body
+  builder with `anthropicStream` — one tested request shape.
+- **#29 sends no tools** (that's #30) but advertises `toolCalling:true` (picker-visibility requirement) — same
+  bounded white lie Codex carried between #14 and #15.
 
 ## Related
 - [[overview]]
 - [[oauth-recon]] — the design source of truth for this feature
-- [[decisions]] — 2026-06-23 #28-built entry (the fingerprint contract)
-- [[gotchas]] — the synthetic-429 / fingerprint trap; F5 dup-extension trap
+- [[decisions]] — 2026-06-23 #29 entry (caps decision + effort deferral)
+- [[gotchas]] — synthetic-429 / fingerprint contract; F5 dup-extension trap

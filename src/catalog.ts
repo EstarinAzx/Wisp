@@ -610,6 +610,11 @@ export const CODEX_MODELS: string[] = [
 // One parsed Server-Sent Event off the Codex Responses stream: the SSE `event:` name and its `data:` JSON.
 export type CodexResponsesEvent = { event: string; data: any };
 
+// The provider-agnostic shape parseSseBlock returns — both Codex (Responses) and Anthropic (Messages)
+// stream `event:`/`data:` SSE, so the same parser feeds both reducers; the event names differ, the shape
+// does not. Aliased so the Anthropic code reads in its own vocabulary rather than "CodexResponsesEvent".
+export type SseEvent = CodexResponsesEvent;
+
 // Parse ONE SSE block (a blank-line-separated run of `event:`/`data:` lines) into an event. The data:
 // lines are joined before JSON parsing (SSE splits long payloads across lines). undefined for a block
 // with no event/data, the [DONE] sentinel, or unparseable JSON. Shared by the non-streaming reader (it
@@ -842,6 +847,72 @@ export const anthropicFingerprint = (firstUserMessage: string, version: string):
 // no cc_workload (interactive run). version must match the User-Agent's claude-cli/<version>.
 export const anthropicAttribution = (firstUserMessage: string, version: string): string =>
   `x-anthropic-billing-header: cc_version=${version}.${anthropicFingerprint(firstUserMessage, version)}; cc_entrypoint=cli;`;
+
+// ----------------------------- Anthropic Messages request + reply (pure cores) ----------------------------- //
+
+// One conversation message for the Messages backend. Inquire sends system+user; native chat sends
+// user/assistant. The Messages API carries the system prompt top-level (not as a role), so a 'system'
+// entry here is lifted out by the body builder rather than placed among `messages`.
+export type AnthropicMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
+// Translate a conversation into an Anthropic Messages request body. The system text moves to the top-level
+// `system` block array — Anthropic does NOT take a system role in `messages` — led by the Claude Code
+// attribution block (its fingerprint derived from the first user message, the exact text sent below). Only
+// user/assistant turns stay in `messages`. stream:true is added only for the streaming path. Shared by
+// anthropicInquire (whole-JSON reply) and anthropicStream (SSE), so the request shape is built+tested once.
+export const buildAnthropicMessagesBody = (args: {
+  model: string; messages: AnthropicMessage[]; maxTokens: number; version: string; stream?: boolean;
+}) => {
+  const wispSystem = args.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const convo = args.messages.filter((m): m is { role: 'user' | 'assistant'; content: string } => m.role !== 'system')
+    .map((m) => ({ role: m.role, content: m.content }));
+  const firstUserMessage = convo[0]?.content ?? '';
+  const system = [
+    { type: 'text' as const, text: anthropicAttribution(firstUserMessage, args.version) },
+    ...(wispSystem ? [{ type: 'text' as const, text: wispSystem }] : []),
+  ];
+  return {
+    model: args.model,
+    max_tokens: args.maxTokens,
+    system,
+    messages: convo,
+    ...(args.stream ? { stream: true as const } : {}),
+  };
+};
+
+// One Anthropic Messages SSE event → its answer-text fragment, else ''. Answer text rides only on a
+// content_block_delta whose delta is a text_delta; a tool_use block's input_json_delta and every lifecycle
+// event (message_start, content_block_start/stop, ping, message_delta/stop) carry no answer text. A
+// non-string text is skipped rather than coerced into the answer.
+export const anthropicTextDelta = (ev: SseEvent): string =>
+  ev.event === 'content_block_delta' && ev.data?.delta?.type === 'text_delta' && typeof ev.data.delta.text === 'string'
+    ? ev.data.delta.text
+    : '';
+
+// Reduce a whole Messages SSE event run to its answer text — concatenate the text_delta fragments in order.
+// An `error` event is a backend failure (throw its message) rather than partial text. anthropicStream
+// yields the same per-event fragments live; this is the testable spec of that streaming semantics.
+export const reduceAnthropicTextEvents = (events: SseEvent[]): string => {
+  let text = '';
+  for (const ev of events) {
+    if (ev.event === 'error') throw new Error(ev.data?.error?.message ?? 'Anthropic response failed');
+    text += anthropicTextDelta(ev);
+  }
+  return text;
+};
+
+// Real Claude model windows — the OAuth Messages path has no models.dev catalogKey, so without this the
+// chat picker would show the neutral default. Windows are the model spec: the Opus and Sonnet 4.x family
+// is a 1M context (standard, no beta), Haiku 4.5 is 200K; Opus tops 128K output, the rest 64K. vision is
+// true (Claude is multimodal). ⚠️ These are the *model* maxes — the Claude.ai subscription Messages path
+// the OAuth token rides may cap lower than 1M; advertised as a picker budgeting hint, so an oversized
+// pack surfaces as a backend error (already handled) rather than being silently wrong.
+export const anthropicModelCaps = (model: string): ModelCaps => {
+  const m = model.toLowerCase();
+  if (m.includes('haiku')) return { contextInput: 200_000, maxOutput: 64_000, vision: true };
+  if (m.includes('opus')) return { contextInput: 1_000_000, maxOutput: 128_000, vision: true };
+  return { contextInput: 1_000_000, maxOutput: 64_000, vision: true }; // sonnet + default
+};
 
 // ----------------------------- PKCE + state (OAuth) ----------------------------- //
 

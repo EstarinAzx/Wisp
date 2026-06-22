@@ -28,9 +28,11 @@ import OpenAI from 'openai';
 import {
   Provider, resolveModel, resolveBaseUrl, buildChatModelInfos, lookupModelsDevCaps,
   buildOpenAiChatMessages, assembleToolCalls, toOpenAiTools, toCodexResponsesTools, isCodexProvider, codexModelCaps,
-  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort,
+  isAnthropicProvider, anthropicModelCaps,
+  type NormalizedTurn, type ToolCallDelta, type CodexCreds, type CodexEffort, type AnthropicCreds,
 } from './catalog';
 import { codexStream } from './codexClient';
+import { anthropicStream } from './anthropicClient';
 import { getModelsDevCatalog } from './modelsDev';
 
 // ----------------------------- Dependencies ----------------------------- //
@@ -48,6 +50,10 @@ export type ChatProviderDeps = {
   codexSignedIn: () => Promise<boolean>;
   codexCreds: () => Promise<CodexCreds | undefined>;
   codexEffort: () => CodexEffort;                   // the panel's Codex reasoning Effort (same value Inquire uses)
+  // Anthropic is the same "usable when signed in" shape as Codex (no API key): the signed-in flag gates
+  // the row, current() returns the refreshed OAuth bundle for the streaming Messages call.
+  anthropicSignedIn: () => Promise<boolean>;
+  anthropicCreds: () => Promise<AnthropicCreds | undefined>;
   log: (message: string) => void;
 };
 
@@ -87,6 +93,11 @@ const toCodexMessages = (messages: readonly vscode.LanguageModelChatRequestMessa
   messages.map(normalizeTurn)
     .map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
+// Native chat turns → Anthropic Messages turns: just role + text. #29 is text-only — images and the tool
+// round-trip (tool_use / tool_result blocks) are slice #30, so they are dropped here for now.
+const toAnthropicMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
+  messages.map(normalizeTurn).map((t) => ({ role: t.role, content: t.text }));
+
 // ----------------------------- Provider ----------------------------- //
 
 // Implements the three LanguageModelChatProvider methods over Wisp's catalog. The model `id` we
@@ -96,8 +107,12 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
   // every Provider first, then hand the plain facts to the pure builder, which owns the usability rules.
   provideLanguageModelChatInformation: async () => {
     const keyedPairs = await Promise.all(
-      // Codex usability is "signed in" (no API key); every other row is "has a key".
-      deps.providers.map(async (p) => [p.id, isCodexProvider(p) ? await deps.codexSignedIn() : !!(await deps.keyFor(p))] as const),
+      // The OAuth rows (Codex, Anthropic) are usable when "signed in" (no API key); every other row is
+      // "has a key".
+      deps.providers.map(async (p) => [p.id,
+        isCodexProvider(p) ? await deps.codexSignedIn()
+          : isAnthropicProvider(p) ? await deps.anthropicSignedIn()
+            : !!(await deps.keyFor(p))] as const),
     );
     const keyed = Object.fromEntries(keyedPairs);
     // Pull the real context/output/vision from models.dev. Race a timeout so a cold/slow fetch never
@@ -107,11 +122,12 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
       getModelsDevCatalog(),
       new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4000)),
     ]);
-    // Codex has no models.dev catalogKey (no /models route), so use its own real-window table; every other
-    // row pulls live caps from models.dev when it has a catalogKey.
+    // Codex and Anthropic have no models.dev catalogKey (no /models route), so each uses its own real-window
+    // table; every other row pulls live caps from models.dev when it has a catalogKey.
     const caps = (provider: Provider, model: string) =>
       isCodexProvider(provider) ? codexModelCaps(model)
-        : provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
+        : isAnthropicProvider(provider) ? anthropicModelCaps(model)
+          : provider.catalogKey ? lookupModelsDevCaps(catalog, provider.catalogKey, model) : undefined;
     return buildChatModelInfos(deps.providers, {
       keyed,
       modelMap: deps.modelMap(),
@@ -148,6 +164,25 @@ const makeProvider = (deps: ChatProviderDeps): vscode.LanguageModelChatProvider 
           let input: object = {};
           try { input = ev.call.argsJson ? JSON.parse(ev.call.argsJson) : {}; } catch { /* keep {} */ }
           progress.report(new vscode.LanguageModelToolCallPart(ev.call.id, ev.call.name, input));
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return; // user cancelled — normal, not a failure
+        deps.log(`[error] chat ${provider.id} ${String(err)}`);
+        throw err;
+      }
+      return;
+    }
+
+    // Anthropic speaks the Messages API, not chat completions — stream it through the dedicated client.
+    // #29 is text-only: agent tools are not forwarded (the tool round-trip is slice #30), so this relays
+    // text deltas as text parts. anthropicStream refreshes nothing — current() handed back fresh creds.
+    if (isAnthropicProvider(provider)) {
+      const creds = await deps.anthropicCreds();
+      if (!creds) return; // only signed-in Anthropic is advertised — rare sign-out race
+      const baseUrl = resolveBaseUrl(provider, deps.customBaseUrl());
+      try {
+        for await (const ev of anthropicStream({ creds, baseUrl, model: modelId, messages: toAnthropicMessages(messages), signal: controller.signal })) {
+          progress.report(new vscode.LanguageModelTextPart(ev.value));
         }
       } catch (err) {
         if (controller.signal.aborted) return; // user cancelled — normal, not a failure

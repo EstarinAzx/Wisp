@@ -6,8 +6,10 @@ import {
   tokensToAnthropicCreds, shouldRefreshAnthropicToken, parseAnthropicCreds,
   base64url, codeVerifier, codeChallenge, oauthState,
   anthropicFingerprint, anthropicAttribution,
-  type Provider,
+  buildAnthropicMessagesBody, reduceAnthropicTextEvents, anthropicModelCaps,
+  type Provider, type SseEvent,
 } from './catalog';
+import { anthropicMessagesHeaders } from './anthropicClient';
 
 const provider = (over: Partial<Provider> = {}): Provider => ({
   id: 'anthropic', label: 'Claude', baseUrl: 'https://api.anthropic.com',
@@ -138,5 +140,123 @@ describe('anthropicAttribution', () => {
   it('builds the x-anthropic-billing-header attribution string', () => {
     expect(anthropicAttribution('hello world', '0.19.0'))
       .toBe('x-anthropic-billing-header: cc_version=0.19.0.ad2; cc_entrypoint=cli;');
+  });
+});
+
+describe('buildAnthropicMessagesBody', () => {
+  // Inquire sends system+user: Anthropic carries the system prompt top-level (a block array), NOT as a
+  // message role, so the system text moves to `system` and only the user turn stays in `messages`. The
+  // attribution rides as the FIRST system block, its fingerprint derived from the first user message.
+  it('moves the system turn to a top-level block after the attribution', () => {
+    const body = buildAnthropicMessagesBody({
+      model: 'claude-opus-4-8', maxTokens: 16_000, version: '0.19.0',
+      messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: 'edit this' }],
+    });
+    expect(body).toEqual({
+      model: 'claude-opus-4-8',
+      max_tokens: 16_000,
+      system: [
+        { type: 'text', text: anthropicAttribution('edit this', '0.19.0') },
+        { type: 'text', text: 'rules' },
+      ],
+      messages: [{ role: 'user', content: 'edit this' }],
+    });
+  });
+
+  // Native chat carries no system turn (VS Code's chat API has no System role) — the system block is then
+  // the attribution alone, and assistant turns ride through in order for a multi-turn conversation.
+  it('keeps user/assistant turns and emits an attribution-only system when there is no system turn', () => {
+    const body = buildAnthropicMessagesBody({
+      model: 'claude-sonnet-4-6', maxTokens: 8_000, version: '0.19.0',
+      messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }, { role: 'user', content: 'more' }],
+    });
+    expect(body.system).toEqual([{ type: 'text', text: anthropicAttribution('hi', '0.19.0') }]);
+    expect(body.messages).toEqual([
+      { role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }, { role: 'user', content: 'more' },
+    ]);
+  });
+
+  // The streaming path needs stream:true on the body; the non-streaming (Inquire) path must omit it.
+  it('adds stream:true only when asked', () => {
+    const streamed = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', stream: true, messages: [{ role: 'user', content: 'x' }] });
+    expect(streamed.stream).toBe(true);
+    const plain = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [{ role: 'user', content: 'x' }] });
+    expect('stream' in plain).toBe(false);
+  });
+});
+
+describe('reduceAnthropicTextEvents', () => {
+  // The streaming shape: answer text arrives as a run of content_block_delta events whose delta is a
+  // text_delta — concatenate them in order. anthropicStream yields the same fragments live.
+  it('concatenates text_delta fragments in order', () => {
+    expect(reduceAnthropicTextEvents([
+      { event: 'content_block_delta', data: { delta: { type: 'text_delta', text: 'Hel' } } },
+      { event: 'content_block_delta', data: { delta: { type: 'text_delta', text: 'lo' } } },
+    ])).toBe('Hello');
+  });
+
+  // Lifecycle events (message_start, content_block_start/stop, ping, message_delta/stop) and a tool_use's
+  // input_json_delta are not answer text — ignored by the text reducer.
+  it('ignores lifecycle events and non-text deltas', () => {
+    expect(reduceAnthropicTextEvents([
+      { event: 'message_start', data: { message: {} } },
+      { event: 'content_block_start', data: { content_block: { type: 'text' } } },
+      { event: 'ping', data: { type: 'ping' } },
+      { event: 'content_block_delta', data: { delta: { type: 'input_json_delta', partial_json: '{"a":' } } },
+      { event: 'content_block_delta', data: { delta: { type: 'text_delta', text: 'real' } } },
+      { event: 'content_block_stop', data: { index: 0 } },
+      { event: 'message_delta', data: { delta: { stop_reason: 'end_turn' } } },
+      { event: 'message_stop', data: {} },
+    ])).toBe('real');
+  });
+
+  // An `error` SSE event is a backend failure — surface its message rather than returning partial text.
+  it('throws with the backend message on an error event', () => {
+    expect(() => reduceAnthropicTextEvents([
+      { event: 'error', data: { error: { type: 'overloaded_error', message: 'boom' } } },
+    ])).toThrow('boom');
+  });
+
+  // A malformed non-string text must be skipped, not coerced ('[object Object]' / '5').
+  it('ignores a non-string text', () => {
+    expect(reduceAnthropicTextEvents([
+      { event: 'content_block_delta', data: { delta: { type: 'text_delta', text: 5 } } },
+      { event: 'content_block_delta', data: { delta: { type: 'text_delta', text: 'real' } } },
+    ] as SseEvent[])).toBe('real');
+  });
+
+  it('returns empty string for no events', () => {
+    expect(reduceAnthropicTextEvents([])).toBe('');
+  });
+});
+
+describe('anthropicModelCaps', () => {
+  // The OAuth Messages path has no models.dev catalogKey, so without this the chat picker would show the
+  // neutral default window. Per the model spec: Opus/Sonnet 4.x are 1M context (Opus 128K output, Sonnet
+  // 64K), Haiku 4.5 is 200K/64K; all multimodal (vision).
+  it('returns the 1M window for Opus/Sonnet and 200K for Haiku, vision capable', () => {
+    expect(anthropicModelCaps('claude-opus-4-8')).toEqual({ contextInput: 1_000_000, maxOutput: 128_000, vision: true });
+    expect(anthropicModelCaps('claude-sonnet-4-6')).toEqual({ contextInput: 1_000_000, maxOutput: 64_000, vision: true });
+    expect(anthropicModelCaps('claude-haiku-4-5')).toEqual({ contextInput: 200_000, maxOutput: 64_000, vision: true });
+  });
+});
+
+describe('anthropicMessagesHeaders', () => {
+  // The client recognition signals: the comma-joined anthropic-beta MUST carry both claude-code-20250219
+  // (the primary gate) and oauth-2025-04-20 (the OAuth path), plus the claude-cli User-Agent and the
+  // Bearer — without these the subscription backend throttles a valid token to a synthetic 429.
+  it('carries the oauth beta, the claude-code gate, and the bearer', () => {
+    const h = anthropicMessagesHeaders('tok');
+    expect(h['anthropic-beta']).toContain('oauth-2025-04-20');
+    expect(h['anthropic-beta']).toContain('claude-code-20250219');
+    expect(h['anthropic-version']).toBe('2023-06-01');
+    expect(h['User-Agent']).toMatch(/^claude-cli\//);
+    expect(h['Authorization']).toBe('Bearer tok');
+  });
+
+  // The streaming request must accept an event stream; the non-streaming (Inquire) request must not.
+  it('adds the event-stream Accept only when streaming', () => {
+    expect(anthropicMessagesHeaders('tok', true)['Accept']).toBe('text/event-stream');
+    expect('Accept' in anthropicMessagesHeaders('tok')).toBe(false);
   });
 });
