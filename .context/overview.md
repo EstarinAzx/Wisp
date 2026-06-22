@@ -1,17 +1,17 @@
 ---
 type: overview
 project: wisp
-updated: 2026-06-19
+updated: 2026-06-23
 tags: [context, overview]
 ---
 
 # Overview
 
 **Project:** wisp
-**One-liner:** **Wisp** — a VS Code extension that is, as of v1.1.0, framed primarily as a **BYOK model router for VS Code's Copilot chat harness**: it registers a **Provider catalog** of backends as selectable models in VS Code's **native chat / Agent mode / Ctrl+I picker** (the LM Chat Provider API, vendor `wisp`, finalized in 1.104) with streaming, **tool calling**, vision, and live models.dev caps — so the user drives Copilot's chat/agent/edit UI with their own keys or ChatGPT subscription. The **secondary** surface is **Inquire** (type an instruction → the model returns SEARCH/REPLACE edit blocks over whole-file context, applied and reviewed as an in-editor accept/reject diff), which routes through the **Active Provider**. Catalog: **11 built-ins** (OpenCode Go default · OpenCode Zen · **Codex** · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom**, with a Preact + Tailwind v4 side panel for switching the Active Provider and managing its credential + model. Two Provider **kinds**: API-key (OpenAI-compatible chat) and **Codex** (`kind:'codex'`, ChatGPT-account OAuth sign-in, runs Codex models on the user's subscription via the Responses API). _Ghost-text Completion was removed in slice #5 (2026-06-17); there is no autocomplete-as-you-type._
+**One-liner:** **Wisp** — a VS Code extension framed as a **BYOK model router for VS Code's Copilot chat harness** (v1.3.0): it registers a **Provider catalog** of backends as selectable models in VS Code's **native chat / Agent mode / Ctrl+I picker** (the LM Chat Provider API, vendor `wisp`, finalized in 1.104) with streaming, **tool calling**, vision, and live models.dev caps. The two OAuth differentiators — **ChatGPT subscription** (Codex) and **Claude.ai subscription** (Anthropic) — are what native BYOK can't reach. The **secondary** surface is **Inquire** (type an instruction → the model returns SEARCH/REPLACE edit blocks over whole-file context, applied and reviewed as an in-editor accept/reject diff), routing through the **Active Provider**. Catalog: **12 built-ins** (OpenCode Go default · OpenCode Zen · **Codex** · **Anthropic** · OpenAI · Groq · Mistral · OpenRouter · Ollama · Ollama Cloud · KiloCode · Cline) **+ Custom**, with a Preact + Tailwind v4 side panel. Three Provider **kinds**: API-key (OpenAI-compatible), **Codex** (`kind:'codex'`, ChatGPT OAuth, Responses API), and **Anthropic** (`kind:'anthropic-oauth'`, Claude.ai OAuth, Messages API). _Ghost-text Completion was removed in slice #5 (2026-06-17); there is no autocomplete-as-you-type._
 
 ## Layout
-- `src/` — extension-host (Node) TypeScript. `extension.ts` (the Inquire command, commands, shared actions, status bar) + `sidePanelProvider.ts` (the WebviewView) + `chatProvider.ts` (the native LM chat-provider glue) + `catalog.ts` (vscode-free pure Provider-catalog data + resolvers + Inquire/Codex helpers; unit-tested by `catalog.test.ts` + `codex.test.ts`). Codex impurities are isolated: `codexAuth.ts` (OAuth/PKCE/loopback/SecretStorage/refresh) + `codexClient.ts` (Responses fetch + SSE→text).
+- `src/` — extension-host (Node) TypeScript. `extension.ts` (the Inquire command, commands, shared actions, status bar) + `sidePanelProvider.ts` (the WebviewView) + `chatProvider.ts` (the native LM chat-provider glue) + `catalog.ts` (vscode-free pure Provider-catalog data + resolvers + Inquire/Codex/Anthropic helpers; unit-tested by `catalog.test.ts` + `codex.test.ts` + `anthropic.test.ts`). OAuth impurities are isolated per kind: `codexAuth.ts`/`codexClient.ts` (Codex OAuth + Responses fetch/SSE→text) and `anthropicAuth.ts`/`anthropicClient.ts` (Anthropic OAuth + Messages fetch/SSE→text).
 - `webview/` — Preact + Tailwind v4 side-panel UI (own tsconfig), bundled separately by Vite.
 - `media/` — activity-bar icon SVG.
 - `.vscode/` — `launch.json` (F5 → Extension Development Host) + `tasks.json` (build).

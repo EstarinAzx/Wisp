@@ -1,17 +1,18 @@
 # Wisp
 
-**Run your ChatGPT subscription as a model inside VS Code's GitHub Copilot chat.** Sign in with your ChatGPT account and OpenAI's **Codex** models answer right in the native **Chat view**, **Agent mode**, and the **`Ctrl+I`** picker — on your own subscription, no API key.
+**Run your ChatGPT or Claude.ai subscription as a model inside VS Code's GitHub Copilot chat.** Sign in with your ChatGPT or Claude.ai account and Codex or Claude models answer right in the native **Chat view**, **Agent mode**, and the **`Ctrl+I`** picker — on your own subscription, no API key.
 
 This is the one thing VS Code's built-in "add a custom model" option **can't** do: it authenticates with a static API key, so it can reach an OpenAI-compatible endpoint but never an **OAuth subscription login**. Wisp can — that's its reason to exist next to Copilot.
 
-Wisp is a **BYOK model router** for the Copilot harness, registering your own backends as selectable models through the finalized `languageModelChatProviders` extension API (vendor `wisp`, stable in VS Code 1.104 — **not** a proposed API, so it works in stock VS Code and is publishable). Two kinds of backend:
+Wisp is a **BYOK model router** for the Copilot harness, registering your own backends as selectable models through the finalized `languageModelChatProviders` extension API (vendor `wisp`, stable in VS Code 1.104 — **not** a proposed API, so it works in stock VS Code and is publishable). Three kinds of backend:
 
-- **Your ChatGPT (Codex) subscription, via OAuth** — *the differentiator.* No key; runs Codex on your own ChatGPT plan through the Responses API. Native custom-endpoint BYOK can't reach this.
+- **Your ChatGPT (Codex) subscription, via OAuth** — No key; runs Codex on your own ChatGPT plan through the Responses API. Native custom-endpoint BYOK can't reach this.
+- **Your Claude.ai subscription, via OAuth** — No key; runs Claude on your own Max/Pro/Team plan through the Messages API. Same limitation: native BYOK won't reach it.
 - **Any OpenAI-compatible API key** — OpenAI, Groq, Mistral, OpenRouter, OpenCode, a local Ollama box, or any Custom base URL.
 
-Net: run Copilot's chat / agent / edit experience on the model access you already pay for — above all, your ChatGPT subscription.
+Net: run Copilot's chat / agent / edit experience on the model access you already pay for — your ChatGPT or Claude.ai subscription, or any key-based backend.
 
-- **Version:** 1.2.0
+- **Version:** 1.3.0
 - **Requires:** VS Code 1.104+
 - **Repo:** [github.com/EstarinAzx/Wisp](https://github.com/EstarinAzx/Wisp)
 - **Not on the Marketplace** — install from a `.vsix` release or from source (see [Install](#install)).
@@ -25,6 +26,7 @@ Net: run Copilot's chat / agent / edit experience on the model access you alread
    - The default provider is **OpenCode Go**.
    - For a key-based provider, paste your key — it goes straight to the OS keychain (see [Security](#security)).
    - To use your **ChatGPT subscription**, run **`Wisp: Sign in to Codex`** instead of setting a key.
+   - To use your **Claude.ai subscription**, run **`Wisp: Sign in to Claude`** instead of setting a key.
    - For a local, keyless model, pick **Ollama**.
 3. **Pick a model.** Run **`Wisp: List / Choose Model`** to fetch the provider's available models and select one. Each provider remembers its own model.
 4. **Use it.** Open the VS Code **Chat view** (or press **`Ctrl+I`** for inline chat) and open the model dropdown. Your Wisp-routed model(s) appear as selectable rows — complete with their real context window and capabilities — right next to Copilot's own models. Select one and start chatting, editing, or running Agent mode.
@@ -36,6 +38,7 @@ Net: run Copilot's chat / agent / edit experience on the model access you alread
 You already have model access you're paying for — a ChatGPT subscription, a Groq or OpenAI key, an Ollama box on your LAN. VS Code's chat/agent/edit UI is excellent, and its built-in BYOK can already add an API-key endpoint — but it stops at a *static key*, so your **ChatGPT subscription** can't get in. Wisp makes all of your backends *first-class citizens* of that UI, subscription included:
 
 - **Your ChatGPT (Codex) subscription, in Chat, Agent, and Edit.** Sign in with your ChatGPT account and run OpenAI's Codex models through the Responses API — streaming, tool calling, vision, no API key. This is the part native BYOK can't do.
+- **Your Claude.ai subscription, in Chat, Agent, and Edit.** Sign in with your Claude.ai account and run Claude (Opus, Sonnet, Haiku) through the Messages API — streaming, tool calling, vision, reasoning Effort, no API key. Same part native BYOK won't reach.
 - **Agent mode on your own Groq or OpenAI key.** Switch to Agent mode, pick a Wisp-routed model, and let it call tools and edit files — billed to your key, not a Copilot seat.
 - **A local Ollama model in chat.** Point Wisp at Ollama on `localhost` (no key), pick it in the chat picker, and keep your prompts and code entirely on-device.
 - **Mix and match.** Every usable provider shows up as its own model row alongside Copilot's. Choose per-conversation which one answers.
@@ -57,9 +60,9 @@ Wisp-routed models are **first-class** in the Copilot harness, not a degraded fa
 
 ## Providers
 
-Wisp ships a curated catalog of **11 built-in providers** plus a **Custom** escape hatch. Exactly one provider is the **Active Provider** at a time — it drives [Inquire](#inquire--ai-inline-code-edit) and the default routing — but the chat harness lists **every usable provider** as its own model row. Each provider remembers its own key and its own model.
+Wisp ships a curated catalog of **12 built-in providers** plus a **Custom** escape hatch. Exactly one provider is the **Active Provider** at a time — it drives [Inquire](#inquire--ai-inline-code-edit) and the default routing — but the chat harness lists **every usable provider** as its own model row. Each provider remembers its own key and its own model.
 
-There are two provider **kinds**.
+There are three provider **kinds**.
 
 ### API-key providers
 
@@ -85,6 +88,14 @@ OpenAI-compatible chat endpoints authenticated with a Bearer key.
 | **Codex** | ChatGPT account (OAuth) | No API key. Runs OpenAI's Codex models on **your own ChatGPT subscription** via the Responses API. Usable whenever you're signed in. Supports streaming, tool calling, and vision in the harness, just like the others. |
 
 Reach Codex by running **`Wisp: Sign in to Codex`** (OAuth with a ChatGPT account). You can also import an existing Codex CLI login — see [Security](#security).
+
+### Anthropic provider
+
+| Provider | Auth | Notes |
+| --- | --- | --- |
+| **Anthropic** | Claude.ai account (OAuth) | No API key. Runs Claude on **your own Claude.ai subscription** (Max/Pro/Team) via the Messages API. Supports streaming, tool calling, vision, and the full **Effort** ladder (`low` → `max`). |
+
+Reach Claude by running **`Wisp: Sign in to Claude`** (OAuth with a Claude.ai account).
 
 ### Custom
 
@@ -112,7 +123,7 @@ Inquire is **code-only** and **fails safe**: a block whose search text isn't fou
 
 ## Side panel & status bar
 
-- **Side panel** (activity-bar icon): manage the **Active Provider**, its **API key**, and its **model**; **sign in / out of Codex**; and watch a **Thinking / Idle** activity indicator.
+- **Side panel** (activity-bar icon): manage the **Active Provider**, its **API key**, **model**, and **Effort** (reasoning depth); **sign in / out of Codex or Claude**; and watch a **Thinking / Idle** activity indicator.
 - **Status-bar item**: shows **ready / thinking / error** state.
 
 ---
@@ -128,6 +139,8 @@ Available from the Command Palette (and the editor chrome where noted):
 | **Wisp: Inquire** | `Ctrl+Shift+I` / `Cmd+Shift+I` | The inline code edit (also via right-click). |
 | **Wisp: Sign in to Codex** | — | OAuth sign-in with a ChatGPT account. |
 | **Wisp: Sign out of Codex** | — | Sign out of Codex. |
+| **Wisp: Sign in to Claude** | — | OAuth sign-in with a Claude.ai account. |
+| **Wisp: Sign out of Claude** | — | Sign out of Claude. |
 
 ---
 
