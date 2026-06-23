@@ -1,59 +1,69 @@
 ---
 type: active-work
 project: wisp
-updated: 2026-06-23
+updated: 2026-06-24
 tags: [context, active-work]
 ---
 
 # Active Work
 
-_Last updated: 2026-06-23 by Opus 4.8 (auto)._
-_At commit: `239fd6e` on `main`. Uncommitted this session: `CLAUDE.md`, `CONTEXT.md`,
-`.context/overview.md` (modified) + `.context/happy-path.md` (new). All docs — no code._
+_Last updated: 2026-06-24 by Opus 4.8._
+_Branch: `feat/bridge` (off `main` at `6adecdf`). Bridge slices #35 + #36 landed this session._
 
 ## Current focus
-**Planned a new feature — the Bridge — through the full `/preset init` funnel** (grill → MVD → PRD
-→ issues). The Bridge is a local OpenAI-compatible endpoint Wisp exposes so external tools (chiefly
-the GitHub Copilot CLI running as a session inside VS Code) can use the Provider catalog —
-**including Codex + Anthropic subscription sign-in** — by pointing their BYOK base-URL at it. No code
-written yet; the work is fully specified as GitHub issues, ready to build.
+**Building the Bridge** (PRD #34) — Wisp's outward-facing local OpenAI-compatible endpoint, so the GitHub
+Copilot CLI (run as a session inside VS Code) can drive a coding task through any Wisp Provider, **including
+the Codex (ChatGPT) and Anthropic (Claude.ai) subscription sign-ins**. Outward mirror of the inward LM Chat
+Provider. The two foundation slices are done; the HTTP listener is next.
 
 ## State
-- **In flight:** nothing coding-wise — design + issues only.
-- **Done this session:** PRD **#34** + 6 tracer slices **#35–#40** created on `EstarinAzx/Wisp`.
-  `CONTEXT.md` gained the **Bridge** glossary term; `CLAUDE.md` gained **§8 Plain Language When
-  Discussing**; `.context/happy-path.md` created (Bridge MVD) + linked from `overview.md` Map.
-- **Blocked:** slice #35 is a *finding* that gates the build (see below); #37+ wait on it.
+- **Done this session:**
+  - **#35 (env-var gate) — RESOLVED.** VS Code does **not** auto-pass env vars into a Copilot-CLI session it
+    spawns. Wisp injects them itself via `context.environmentVariableCollection.replace()` (×5 Copilot BYOK
+    vars: `COPILOT_PROVIDER_BASE_URL` / `COPILOT_MODEL` / `COPILOT_PROVIDER_API_KEY` / `COPILOT_PROVIDER_TYPE` /
+    `COPILOT_OFFLINE`); fallbacks = `terminal.integrated.env.<platform>` or shell-launch. Full finding in
+    [[decisions]] (2026-06-24). Verdict derived from docs + the 1.104 API — **the live F5 is the pending
+    final confirm** (see Open questions).
+  - **#36 (protocol translator) — BUILT.** New pure, vscode-free `src/bridge.ts` + `src/bridge.test.ts`
+    (joins the `catalog.ts` family). `parseOpenAiChatRequest` (inbound, inverse of `buildOpenAiChatMessages`),
+    OpenAI-SSE emitters (`textChunk`/`toolCallChunk`/`finalChunk`/`sseLine`/`SSE_DONE`), `buildModelsList`.
+    A 15-agent adversarial review of the diff confirmed 5 trust-boundary findings → untrusted-input guards
+    added (TDD). `npm test` **234 green**, `tsc` clean. `catalog.ts` untouched.
+- **In flight:** nothing — clean stopping point, committed.
+- **Unblocked:** **#37** (HTTP listener + key-based walking skeleton) needed #35 + #36 both done → now ready.
 
 ## Pick up here
-**Start the Bridge build loop — `#35` and `#36` are both unblocked and parallel:**
-1. **#36 (recommended first — pure TDD, AFK):** build the protocol translator (OpenAI ↔ Wisp turns,
-   Wisp stream → OpenAI SSE, `GET /v1/models`). vscode-free, mirrors `catalog.test.ts`. → `/preset scope 36`.
-2. **#35 (gate — HITL, no production code):** verify whether VS Code passes env vars
-   (`COPILOT_PROVIDER_BASE_URL` etc.) into the spawned Copilot CLI. Yes → hands-free; No → document the
-   shell-launch / `terminal.integrated.env` fallback. **#37 (skeleton) needs #35 + #36 both done.**
-3. After #37: panel **#38**, Codex **#39**, Anthropic **#40** (all blocked by #37).
-
-Commit the uncommitted docs first (CLAUDE.md / CONTEXT.md / overview.md / happy-path.md) — small, run `/preset wrap-up` or commit straight to `main`.
+**Start #37 — the HTTP listener + key-based Provider walking skeleton.** → `/preset scope 37`.
+1. Bind `127.0.0.1` on a configurable `wisp.*` port; enforce the access-secret Bearer on every request.
+2. Wire the translator: untrusted JSON body → `parseOpenAiChatRequest` → resolve the named Provider
+   (`model` = a Provider id) → existing **OpenAI SDK** send path (keyed Providers first; Codex #39 /
+   Anthropic #40 later) → render the reply stream back through `bridge.ts`'s SSE emitters.
+3. Serve `GET /v1/models` from `buildModelsList(buildChatModelInfos(...))`.
+4. The parse **degrades** on malformed input (empty turns / skipped bad parts) rather than throwing — so map
+   a parse that yields nothing to a deliberate **400**, don't rely on catching a `TypeError`.
+- The listener, panel toggle, and secret display are **glue → F5/manual-verified, NOT unit-tested** (per PRD).
+- After #37: panel toggle + secret (#38), Codex (#39), Anthropic (#40).
 
 ## Skills for next session
-- /preset scope — to enter the work loop on #36 or #35.
-- superpowers:test-driven-development — #36 is a red-green-refactor pure module.
+- /preset scope — to enter the work loop on #37.
+- superpowers:test-driven-development — only the *pure* parts get TDD'd; #37 is mostly glue (F5).
 
 ## Open questions
-- **#35's answer** — does the VS Code Copilot CLI session inherit env vars? Unknown until tested; gates wiring, not architecture.
+- **#35's live F5** — does a Copilot CLI session in a VS Code terminal actually inherit the injected vars and
+  reach the Bridge? Documented-yes, live-unconfirmed. Confirm during/after #37, when there's a listener to hit.
 
 ## Recent context
-- **Bridge is EMBEDDED in the extension host, not standalone** — required so it reuses the live
-  SecretStorage Codex/Anthropic tokens + refresh. Standalone can't read SecretStorage. See [[decisions]].
-- **ToS posture unchanged from today** — same subscription sign-ins, creds never leave Wisp; provider
-  only ever sees Wisp. The proxy adds no new ToS category (user pushed hard on this; conceded it's the
-  same call already made shipping the OAuth providers).
-- **User pref reinforced this session:** plain language in discussion/grilling, jargon last (now CLAUDE.md §8).
-- **Prior open tasks still live:** tag `v1.3.0` if untagged; subscription 1M-context-ceiling probe; Anthropic image input (deferred).
+- **Bridge is EMBEDDED in the extension host** (reuses the live SecretStorage Codex/Anthropic tokens +
+  refresh); standalone rejected — it can't read SecretStorage. See [[decisions]] 2026-06-23.
+- **The translator guards untrusted input by design** — `parseOpenAiChatRequest` degrades (never throws) on a
+  missing/non-array `messages`, non-iterable user `content`, a `tool_call`/`tools` entry with no `function`,
+  or unknown/partial content parts. **Don't strip those guards** — the #37 listener relies on a non-throwing
+  parse. (Surfaced by the pre-landing adversarial review.)
+- **ToS posture unchanged** — the Bridge adds no new ToS category (same subscription sign-ins, creds never
+  leave Wisp; the provider only ever sees Wisp).
 
 ## Related
 - [[overview]]
 - [[happy-path]] — the Bridge golden-path MVD
-- [[decisions]] — 2026-06-23 "The Bridge" entry (embedded-vs-standalone, addressing, security)
+- [[decisions]] — 2026-06-23 "The Bridge" + 2026-06-24 (#35 finding, #36 build)
 - [[gotchas]] — F5 dup-extension trap still applies before any Bridge F5

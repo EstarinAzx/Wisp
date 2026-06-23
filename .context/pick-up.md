@@ -1,36 +1,32 @@
 ---
 type: pick-up
 project: wisp
-updated: 2026-06-23
+updated: 2026-06-24
 tags: [context, pick-up]
 ---
 
 # Pick up
 
-Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate.
+Start: read `.context/overview.md` + `.context/active-work.md` (rehydrate the project, then the Bridge build state).
 
-**Last session (2026-06-23):** Docs-only — updated `README.md` for **v1.3.0** documenting the new
-Anthropic (Claude.ai OAuth) provider. Hero pitch now covers ChatGPT **or** Claude.ai subscription;
-three backend kinds (was two); new "Anthropic provider" table; **Wisp: Sign in/out of Claude** command
-rows; Effort added to the side-panel bullet; provider count 11→12; version 1.3.0. Also refreshed
-`overview.md` (count, three kinds, Anthropic modules in layout) + `active-work.md`. No code change.
-Release 1.3.0 itself (the full Anthropic provider #28–#32) was already merged to `main` at `6bb632e`.
+**Last session (2026-06-24, branch `feat/bridge`):** Bridge foundation slices **#35** and **#36**.
+- **#35 (env-var gate) — resolved.** VS Code does NOT auto-pass env vars to a spawned Copilot CLI; Wisp
+  injects the 5 Copilot BYOK vars itself via `context.environmentVariableCollection`. Documented-yes;
+  **live F5 still unconfirmed.** Finding in [[decisions]] (2026-06-24).
+- **#36 (protocol translator) — built.** Pure `src/bridge.ts` + `bridge.test.ts` (`npm test` 234 green,
+  tsc clean). A pre-landing adversarial review added trust-boundary guards. `catalog.ts` untouched.
 
-**Next task:**
-1. **Tag `v1.3.0`** if missing — `git tag --list` to check; match the `v1.2.0` tag convention; consider
-   a GitHub release.
-2. **Subscription 1M-context-ceiling probe** — `anthropicModelCaps` (`src/catalog.ts`) advertises
-   model-spec 1M for Opus/Sonnet; if a long Claude.ai-OAuth chat 4xx/413s, the subscription path caps
-   lower (~200K?) → drop their `contextInput`. Small, isolated. See [[decisions]] (2026-06-23 #29 entry).
-3. **Anthropic image input** — deferred follow-up (tool-calling #30 shipped; images stay deferred).
+**Next task — #37 (now unblocked):**
+`/preset scope 37` — the Bridge **HTTP listener + key-based walking skeleton**: bind `127.0.0.1` on a
+`wisp.*` port, enforce the access-secret Bearer, parse the body with `parseOpenAiChatRequest`, resolve the
+named Provider, send via the existing OpenAI SDK path, render the reply through `bridge.ts`'s SSE emitters,
+serve `GET /v1/models` from `buildModelsList(buildChatModelInfos(...))`. Glue → F5-verified, not unit-tested.
+After #37: panel toggle + secret (#38), Codex (#39), Anthropic (#40).
 
 **Landmines / things to know:**
-- **`CLAUDE.md` is uncommitted** (pre-existing, unrelated) — keep it out of doc commits unless asked.
-- **README is router-first** (since v1.1.0) — Inquire is the secondary surface; don't reframe Inquire-first.
-- **Effort is two independent capabilities** — `max` = Opus 4.6/4.7/4.8, `xhigh` = Opus 4.7/4.8. Picker
-  over-offers, wire clamps (`anthropicThinkingEffort`). Source: openclaude `src/utils/effort.ts`. [[gotchas]].
-- **The #28 fingerprint contract is load-bearing** — samples first-user-message TEXT only, never body fields.
+- The translator **degrades, never throws** on malformed input by design — in #37, map a parse that yields
+  nothing to a deliberate **400**; don't lean on try/catch for control flow, and don't strip the guards.
+- **#35 is documented-yes / live-unconfirmed** — confirm a Copilot CLI session actually reaches the Bridge during #37.
 - **Before any F5:** uninstall `local.wisp` (stale-panel collision). See [[gotchas]].
 
-Full state in [[active-work]]; verified design in [[oauth-recon]]; contracts in [[decisions]] (2026-06-23);
-traps in [[gotchas]]; domain language in `CONTEXT.md`.
+Full state in [[active-work]]; the #36 design rationale + the #35 finding in [[decisions]] (2026-06-24); traps in [[gotchas]].
