@@ -11,7 +11,8 @@
  *   - InMsg: state{state} | models{ids} | modelsError{message} | activity{thinking} — everything
  *     the extension sends. activity carries the live Thinking/Idle state, separate from state.
  *   - Outbound: ready | setApiKey{value} | clearApiKey | selectModel{value} | selectProvider{value}
- *     | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut | selectEffort{value}.
+ *     | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut | selectEffort{value}
+ *     | bridgeToggle | copyBridgeSecret | copyBridgeAddress.
  */
 
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -32,6 +33,9 @@ type State = {
   modelOptions?: string[];
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   effortOptions?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]; // host-computed; 'max' only for max-capable Claude (#32)
+  bridgeRunning: boolean;
+  bridgeAddress: string;
+  bridgeSecret?: string; // present only while running — the secret to paste into the Copilot CLI
 };
 
 type InMsg =
@@ -307,6 +311,41 @@ export const App = () => {
           </select>
         </section>
       )}
+
+      {/* ------------------------------ Bridge ------------------------------ */}
+      {/* The outward local OpenAI endpoint. OFF by default; the switch drives the SAME start/stop as the
+          command. While running, show the address + access secret (copy host-side) to paste into the CLI. */}
+      <section class="flex flex-col gap-1.5">
+        <h2 class="section-title">Bridge</h2>
+        <div class="flex items-center gap-2">
+          <span
+            class={`inline-block h-2 w-2 rounded-full ${
+              state.bridgeRunning
+                ? 'bg-[var(--vscode-charts-green,var(--vscode-descriptionForeground))]'
+                : 'bg-[var(--vscode-descriptionForeground)]'
+            }`}
+          />
+          <span class="text-[var(--vscode-descriptionForeground)]">{state.bridgeRunning ? 'Running' : 'Stopped'}</span>
+        </div>
+        <button class="btn" onClick={() => vscode.postMessage({ type: 'bridgeToggle' })}>
+          {state.bridgeRunning ? 'Stop Bridge' : 'Start Bridge'}
+        </button>
+        {state.bridgeRunning && (
+          <div class="flex flex-col gap-1.5">
+            <div class="flex gap-1.5">
+              <input class="input min-w-0 flex-1" type="text" readonly value={state.bridgeAddress} />
+              <button class="btn btn-secondary shrink-0" title="Copy address" onClick={() => vscode.postMessage({ type: 'copyBridgeAddress' })}>Copy</button>
+            </div>
+            <div class="flex gap-1.5">
+              <input class="input min-w-0 flex-1" type="password" readonly value={state.bridgeSecret ?? ''} />
+              <button class="btn btn-secondary shrink-0" title="Copy access secret" onClick={() => vscode.postMessage({ type: 'copyBridgeSecret' })}>Copy</button>
+            </div>
+            <p class="text-xs text-[var(--vscode-descriptionForeground)]">
+              Open a new terminal after starting so the Copilot CLI inherits the Bridge.
+            </p>
+          </div>
+        )}
+      </section>
 
       <footer class="text-xs text-[var(--vscode-descriptionForeground)] break-all">
         {state.baseUrl}

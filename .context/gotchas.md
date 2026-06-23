@@ -231,6 +231,15 @@ valid JSON` (its degrade-to-400 path — **not** a listener bug). For Bridge F5 
 `opencode` → `404 unknown provider`); `GET /v1/models` lists the usable keyed ids. And `curl` (bare) is a
 PowerShell alias for `Invoke-WebRequest` with different flags — always call `curl.exe` explicitly.
 
+### Bridge `COPILOT_*` env vars reach only terminals opened AFTER Start (#38)
+`context.environmentVariableCollection` applies at **terminal creation**, so a terminal already open when you
+click Start keeps the old (empty) env and won't see the Bridge — open a **fresh** terminal after Start, or
+relaunch it (VS Code shows a stale-env warning icon on the tab). Two more: the collection is `.persistent` by
+default, so Wisp `clear()`s it **on activate** as well as on stop (else a reload re-applies last session's
+dead-port `BASE_URL` + stale secret while the Bridge is OFF) — don't drop that activate-time clear; and
+`COPILOT_MODEL` only re-syncs on a Provider switch while running, so an F5 Copilot-CLI test must use a **keyed**
+Provider (`codex`/`anthropic` still answer `400 not yet reachable` until #39/#40).
+
 ## Related
 - [[api]]
 - [[decisions]]

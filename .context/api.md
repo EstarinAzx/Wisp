@@ -21,7 +21,7 @@ The project's surface is a VS Code extension: the Inquire command, other command
 | `wisp.inquire` | Wisp: Inquire | **Inline-chat edit (slice #4).** `showInputBox` instruction → target span = selection (or current line if none), whole file = context → `buildEditPrompt` → blocks/diff. **Branches on the Active Provider's `kind`:** `codex` → `codexClient.codexInquire` (Responses API, sign-in required); else → the OpenAI SDK chat-completions client. Cancellable `withProgress`. Keybinding **`Ctrl+Shift+I`**. In the `editor/context` menu + palette. |
 | `wisp.codexSignIn` | Wisp: Sign in to Codex | Run the ChatGPT-account OAuth flow (`CodexAuth.signIn`), store tokens in SecretStorage `wisp.codexAuth`, refresh the panel. |
 | `wisp.codexSignOut` | Wisp: Sign out of Codex | Tombstone the Codex token slot (empty `{}`, not delete — so `~/.codex/auth.json` isn't re-imported; see [[gotchas]]) + refresh the panel. |
-| `wisp.bridgeToggle` | Wisp: Toggle Bridge | **#37 Bridge driver.** Start the listener if stopped (toast: address + access secret), stop it if running. Calls `bridge.start()/stop()` on the `createBridgeServer` handle. Temporary until the panel switch (#38) drives the same start/stop. |
+| `wisp.bridgeToggle` | Wisp: Toggle Bridge | Start the listener if stopped, stop it if running — via the **shared** `startBridge`/`stopBridge` (#38) the panel switch also drives (no fork). Start generates/loads the access secret, binds the port, and injects the `COPILOT_*` env vars; stop closes the port + wipes the in-mem secret + clears the env. Pushes panel state after either. |
 
 ## Settings (`wisp.*`)
 `provider` (str, default `opencode-go`, **`scope: machine`** — the Active Provider id; selecting one selects where the bearer key is sent, so it must not be workspace-overridable; unknown → falls back to `opencode-go`), `baseUrl` (str, default `https://opencode.ai/zen/go/v1`, **`scope: machine`** — used **only** when the Active Provider is `custom`; built-ins ignore it and use their hardcoded catalog URL), `model` (str, default **bare** `minimax-m3` — the prefixed form is rejected, see [[gotchas]]; now a **mirror** of the Active Provider's model, sourced from globalState), `maxTokens` (0 = uncapped), `temperature` (0.1), `bridge.port` (number, default `41184`, **`scope: machine`** — the `127.0.0.1` port the Bridge listener binds; machine-scoped so a workspace can't move the listener). No `apiKey` setting — key is SecretStorage/env only. **Completion-only settings (`enabled`/`debounceMs`/`maxPrefixChars`/`maxSuffixChars`) were removed in slice #5.** Panel and commands write to the scope that already defines the value (`targetFor()`), not blindly Global.
@@ -38,11 +38,20 @@ The project's surface is a VS Code extension: the Inquire command, other command
 ## The Bridge — outward OpenAI-compatible endpoint (PRD #34; listener #37)
 Wisp's first **inbound** network listener — the outward mirror of the LM Chat Provider. `src/bridgeServer.ts`
 (`createBridgeServer(deps)` → `{ start, stop, isRunning, dispose }`) is impure glue over the pure `src/bridge.ts`
-translator; node `http` stdlib, no web framework. OFF by default — started/stopped by `wisp.bridgeToggle` (panel
-switch is #38). Binds **`127.0.0.1`** on `wisp.bridge.port`. The deps seam mirrors `chatProvider.ts`'s
-`ChatProviderDeps` (providers + model-map/baseUrl getters + async `keyFor`/`clientFor`); `extension.ts` owns secrets.
+translator; node `http` stdlib, no web framework. OFF by default — started/stopped by both `wisp.bridgeToggle`
+**and** the side-panel switch, through the shared `startBridge`/`stopBridge` in `extension.ts` (#38). Binds
+**`127.0.0.1`** on `wisp.bridge.port`. The deps seam mirrors `chatProvider.ts`'s `ChatProviderDeps` (providers +
+model-map/baseUrl getters + async `keyFor`/`clientFor`); `extension.ts` owns secrets.
 - **Auth:** every request needs `Authorization: Bearer <access-secret>` (constant-time compare); mismatch → **401**.
-  The secret is a temp constant (`BRIDGE_ACCESS_SECRET`) until #38 generates + stores + displays it.
+  The secret is **auto-generated** (`randomBytes(32)` base64url, #38), stored in SecretStorage slot
+  **`wisp.bridge.secret`** once and reused, surfaced in the panel with Copy, and held in a module var only while
+  running (`accessSecret: () => bridgeSecret`, `''` when stopped — the sync auth check can't `await` SecretStorage).
+- **Copilot CLI wiring (#35/#38):** while running, `injectCopilotEnv()` sets five `COPILOT_*` vars on
+  `context.environmentVariableCollection` so any integrated terminal opened **after** Start points at the Bridge —
+  `COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:<port>/v1`, `COPILOT_MODEL=`active-Provider-id (re-synced on a
+  mid-run Provider switch), `COPILOT_PROVIDER_API_KEY=`the access secret, `COPILOT_PROVIDER_TYPE=openai`,
+  `COPILOT_OFFLINE=true`. Cleared on stop **and on activate** (the collection is `.persistent` by default, Bridge
+  starts OFF). Existing terminals stay stale until relaunched — see [[gotchas]].
 - **`POST /v1/chat/completions`:** `parseOpenAiChatRequest` (untrusted body → **400** on bad JSON or no turns) →
   resolve the `model` field as a **Provider id** → its `resolveModel` model → existing OpenAI SDK
   `chat.completions.create` (`stream:true`, system re-prepended) → reply via `bridge.ts` SSE emitters, OR one
@@ -70,8 +79,8 @@ switch is #38). Binds **`127.0.0.1`** on `wisp.bridge.port`. The deps seam mirro
 - The panel calls the same shared actions as the commands (`storeApiKey`/`clearApiKey`/`fetchModelIds`/`setModel`/`setProvider`/`setBaseUrl`/`getState`), injected as a `PanelHost` — panel and commands never drift.
 
 ### Message protocol
-- **webview → ext:** `ready` · `setApiKey{value}` · `clearApiKey` · `selectModel{value}` · `selectProvider{value}` · `setBaseUrl{value}` · `refreshModels` · `codexSignIn` · `codexSignOut`.
-- **ext → webview:** `state{state}` where `state = {keyIsSet, keySource: 'stored'|'env'|'none', keyEnv, model, baseUrl, providerId, providers: {id,label}[], isCustom, kind?: 'openai-chat'|'codex', signedIn?, modelOptions?}` · `models{ids}` · `modelsError{message}` · `activity{thinking}`. For a `codex` Provider the panel shows sign-in/out (driven by `signedIn`) instead of the key field, and the model dropdown uses `modelOptions` (the curated `CODEX_MODELS`) since there's no live `/models` fetch.
+- **webview → ext:** `ready` · `setApiKey{value}` · `clearApiKey` · `selectModel{value}` · `selectProvider{value}` · `setBaseUrl{value}` · `refreshModels` · `codexSignIn` · `codexSignOut` · `selectEffort{value}` · `bridgeToggle` · `copyBridgeSecret` · `copyBridgeAddress` (#38 — toggle drives the shared start/stop; copies are done host-side via `vscode.env.clipboard`).
+- **ext → webview:** `state{state}` where `state = {keyIsSet, keySource: 'stored'|'env'|'none', keyEnv, model, baseUrl, providerId, providers: {id,label}[], isCustom, kind?, signedIn?, modelOptions?, effort?, effortOptions?, bridgeRunning, bridgeAddress, bridgeSecret?}` · `models{ids}` · `modelsError{message}` · `activity{thinking}`. For a `codex` Provider the panel shows sign-in/out (driven by `signedIn`) instead of the key field, and the model dropdown uses `modelOptions` (the curated `CODEX_MODELS`) since there's no live `/models` fetch. The **Bridge** section (#38) shows a running/stopped dot + Start/Stop, and while running the address + secret (`bridgeSecret` present only then) with Copy buttons.
 - **Key is write-only across the boundary** — the value is never sent back (only presence + source), and error text is `sanitizeError`'d so a server 401 body can't leak key fragments. See [[gotchas]].
 - State is pushed on `ready`, on `onDidChangeConfiguration` (any `wisp.*`), and on `secrets.onDidChange` (covers this window's key writes and changes from other windows).
 - **Activity** (`activity{thinking}`) is the live Thinking/Idle signal, pushed separately from `state` on every in-flight transition (`enter/exitInFlight`) **and** on `ready` (via `PanelHost.getActivity`), so it never drags the async `getState`/model-refetch path. The panel renders it as a top status row (pulse dot); the status bar shows the same Activity as `ready`/`thinking`/`error`. See [[decisions]].

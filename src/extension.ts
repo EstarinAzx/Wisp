@@ -17,6 +17,7 @@
  */
 
 import * as vscode from 'vscode';
+import { randomBytes } from 'crypto';
 import OpenAI from 'openai';
 import { NO_KEY_MESSAGE, WispPanelProvider, PanelState } from './sidePanelProvider';
 import {
@@ -39,9 +40,9 @@ const CONFIG_NS = 'wisp';
 // this bare name is read once by migrateLegacyKey() then deleted. Not a literal key.
 const SECRET_KEY = 'wisp.apiKey';
 
-// Bridge access secret — required as the Bearer on every Bridge request. ponytail: a temporary constant for
-// the #37 walking skeleton; the auto-generated, SecretStorage-backed, panel-displayed secret is slice #38.
-const BRIDGE_ACCESS_SECRET = 'wisp-bridge-dev-secret';
+// SecretStorage slot for the Bridge access secret — the Bearer the listener requires on every request.
+// Generated once on first start (never in plaintext settings) then reused, so a configured CLI stays valid.
+const BRIDGE_SECRET_SLOT = 'wisp.bridge.secret';
 // Default Bridge port (overridable via wisp.bridge.port) — a fixed high port unlikely to clash.
 const DEFAULT_BRIDGE_PORT = 41184;
 
@@ -127,9 +128,15 @@ let codexAuth: CodexAuth;
 // Anthropic (Claude.ai) OAuth/token lifecycle — same role as codexAuth for the kind:'anthropic-oauth' row.
 let anthropicAuth: AnthropicAuth;
 
-// The Bridge listener handle — created in activate, started/stopped by the wisp.bridgeToggle command. OFF
+// The Bridge listener handle — created in activate, started/stopped by the command AND the panel switch. OFF
 // until toggled on (PRD: no local port open until the user deliberately enables it).
 let bridge: ReturnType<typeof createBridgeServer>;
+// The Bridge access secret, held in memory only while the Bridge runs (the listener reads it sync per
+// request, so it can't await SecretStorage). Loaded/generated on start, cleared to '' on stop.
+let bridgeSecret = '';
+// VS Code's env-var collection — terminals opened after start inherit the COPILOT_* BYOK vars (#35 finding),
+// pointing the Copilot CLI at the live Bridge with no user setup; cleared on stop.
+let envCollection: vscode.EnvironmentVariableCollection;
 
 // B2 inline-diff state. While a preview is on screen the buffer holds old+new lines together
 // (decorated), and exactly one preview is live at a time. `range` covers the rendered preview text;
@@ -336,6 +343,12 @@ const getState = async (): Promise<PanelState> => {
     // The option list backing that select — Anthropic shows the full low→max ladder (the wire clamps per
     // model), Codex stops at xhigh; mirrors the first-party /effort slider (#32).
     effortOptions: isCodexProvider(p) || isAnthropicProvider(p) ? effortOptionsFor(p) : undefined,
+    // Bridge surface: the running/stopped indicator + the address/secret the user copies into the CLI. The
+    // secret crosses the boundary only while running (it's the Bridge's own localhost secret, meant to be
+    // copied — not a Provider key); '' in memory while stopped, so it stays hidden then.
+    bridgeRunning: bridge.isRunning(),
+    bridgeAddress: bridgeAddress(),
+    bridgeSecret: bridge.isRunning() ? bridgeSecret : undefined,
   };
 };
 
@@ -534,21 +547,77 @@ const anthropicSignOut = async (): Promise<void> => {
   void panel?.postState();
 };
 
-// Toggle the Bridge listener on/off. ponytail: this command is the #37 driver — it shows the address + secret
-// in a toast so an F5/curl test can copy them; the panel switch + copy button + generated secret are slice #38.
+// The Bridge's localhost address (no path) — shown in the panel and the base for the injected BASE_URL.
+const bridgeAddress = (): string => `http://127.0.0.1:${bridgePort()}`;
+
+// The access secret, from SecretStorage — generated once on first use (high-entropy random, base64url so
+// it's copy-paste safe) then reused so a configured CLI keeps working across restarts.
+const ensureBridgeSecret = async (): Promise<string> => {
+  const existing = (await secrets.get(BRIDGE_SECRET_SLOT))?.trim();
+  if (existing) return existing;
+  const generated = randomBytes(32).toString('base64url');
+  await secrets.store(BRIDGE_SECRET_SLOT, generated);
+  return generated;
+};
+
+// Point every future integrated terminal at the live Bridge (#35): the five Copilot CLI BYOK vars, read from
+// the process env at terminal creation. COPILOT_MODEL = the Active Provider id, so the panel's choice is the
+// single source of truth (story 8). Existing terminals need a relaunch to pick these up — hence the panel hint.
+const injectCopilotEnv = (): void => {
+  envCollection.replace('COPILOT_PROVIDER_BASE_URL', `${bridgeAddress()}/v1`);
+  envCollection.replace('COPILOT_MODEL', activeProvider().id);
+  envCollection.replace('COPILOT_PROVIDER_API_KEY', bridgeSecret);
+  envCollection.replace('COPILOT_PROVIDER_TYPE', 'openai');
+  envCollection.replace('COPILOT_OFFLINE', 'true');
+  envCollection.description = 'Wisp Bridge — Copilot CLI BYOK vars (open a new terminal to pick them up).';
+};
+
+// Start the Bridge: materialize the secret (so the listener can require it), bind the port, point new
+// terminals at it. Shared by the command and the panel switch — one lifecycle, never forked.
+const startBridge = async (): Promise<void> => {
+  bridgeSecret = await ensureBridgeSecret();
+  await bridge.start();
+  injectCopilotEnv();
+};
+
+// Stop the Bridge: close the port, forget the in-memory secret, stop pointing terminals at a dead port.
+// ponytail: bridge.stop()'s server.close() is async, so a fast stop→start (panel double-click) can hit
+// EADDRINUSE before the OS frees the port; it self-heals (error toast + retry once freed). Gate the toggle
+// button on a transition flag if that race ever bites in practice.
+const stopBridge = (): void => {
+  bridge.stop();
+  bridgeSecret = '';
+  envCollection.clear();
+};
+
+// Toggle command (palette) — drives the SAME start/stop the panel switch uses, then pushes panel state so
+// the indicator + address/secret reflect the change on either trigger.
 const bridgeToggle = async (): Promise<void> => {
-  if (bridge.isRunning()) {
-    bridge.stop();
-    vscode.window.showInformationMessage('Wisp: Bridge stopped.');
-    return;
-  }
   try {
-    await bridge.start();
-    vscode.window.showInformationMessage(`Wisp: Bridge on http://127.0.0.1:${bridgePort()} — access secret: ${BRIDGE_ACCESS_SECRET}`);
+    if (bridge.isRunning()) {
+      stopBridge();
+      vscode.window.showInformationMessage('Wisp: Bridge stopped.');
+    } else {
+      await startBridge();
+      vscode.window.showInformationMessage(`Wisp: Bridge on ${bridgeAddress()} — address + secret are in the Wisp panel.`);
+    }
   } catch (err) {
-    output.appendLine(`[error] bridge start ${String(err)}`);
+    output.appendLine(`[error] bridge toggle ${String(err)}`);
     vscode.window.showErrorMessage(`Wisp: Bridge failed to start — ${String(err)}`);
   }
+  void panel?.postState();
+};
+
+// Panel copy buttons → the system clipboard via VS Code (webview clipboard access is restricted, so the copy
+// is done host-side on values the host already owns). No-op for the secret when the Bridge is stopped.
+const copyBridgeSecret = async (): Promise<void> => {
+  if (!bridgeSecret) return;
+  await vscode.env.clipboard.writeText(bridgeSecret);
+  vscode.window.showInformationMessage('Wisp: Bridge access secret copied.');
+};
+const copyBridgeAddress = async (): Promise<void> => {
+  await vscode.env.clipboard.writeText(bridgeAddress());
+  vscode.window.showInformationMessage('Wisp: Bridge address copied.');
 };
 
 // List served models in a quick-pick and write the choice into the setting.
@@ -710,6 +779,12 @@ export const activate = (context: vscode.ExtensionContext): void => {
   output = vscode.window.createOutputChannel('Wisp');
   secrets = context.secrets;
   globalState = context.globalState;
+  // The Bridge injects the COPILOT_* BYOK vars into this collection while running (#35); cleared on stop.
+  // The collection is .persistent by default, so VS Code re-applies the last session's vars on reload —
+  // but the Bridge always starts OFF, so clear them on activate or new terminals would inherit a dead-port
+  // BASE_URL + stale secret while nothing is listening.
+  envCollection = context.environmentVariableCollection;
+  envCollection.clear();
   // Codex token lifecycle — browser open goes through vscode.env.openExternal; logs to the Wisp channel.
   codexAuth = new CodexAuth(context.secrets, (url) => vscode.env.openExternal(vscode.Uri.parse(url)), (m) => output.appendLine(m));
   // Anthropic (Claude.ai) token lifecycle — same injection as Codex.
@@ -746,6 +821,9 @@ export const activate = (context: vscode.ExtensionContext): void => {
     anthropicSignIn,
     anthropicSignOut,
     setEffort,
+    toggleBridge: bridgeToggle, // the panel switch drives the SAME start/stop as the command
+    copyBridgeSecret,
+    copyBridgeAddress,
   });
 
   // The Bridge listener — the outward mirror of the LM Chat Provider. Reuses the same key/client resolvers
@@ -757,7 +835,7 @@ export const activate = (context: vscode.ExtensionContext): void => {
     keyFor: keyForProvider,
     clientFor: clientForProvider,
     port: bridgePort,
-    accessSecret: () => BRIDGE_ACCESS_SECRET,
+    accessSecret: () => bridgeSecret,
     log: (m) => output.appendLine(m),
   });
 
@@ -808,6 +886,9 @@ export const activate = (context: vscode.ExtensionContext): void => {
       if (e.affectsConfiguration('wisp.provider') || e.affectsConfiguration('wisp.baseUrl') || e.affectsConfiguration('wisp.model')) cachedClient = undefined;
       // A raw wisp.provider edit (no panel in Issue 4) must re-mirror wisp.model to the new Provider.
       if (e.affectsConfiguration('wisp.provider')) void mirrorActiveModel();
+      // COPILOT_MODEL = the Active Provider id; keep it true if the Provider switches mid-run so new
+      // terminals get the current choice. Only the model var — BASE_URL stays bound to the running port.
+      if (e.affectsConfiguration('wisp.provider') && bridge.isRunning()) envCollection.replace('COPILOT_MODEL', activeProvider().id);
       // Any of our settings may be on screen in the panel — mirror every change there.
       if (e.affectsConfiguration(CONFIG_NS)) void panel?.postState();
     }),
