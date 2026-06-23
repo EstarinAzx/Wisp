@@ -46,5 +46,6 @@ tags: [context, overview]
 - [[stack]] — languages, libraries, env vars
 - [[api]] — the extension's command/provider/settings surface + the external Zen API
 - [[active-work]] — current handoff state
+- [[happy-path]] — the Bridge golden-path MVD (design-time user journey)
 - [[decisions]] — settled questions (design review + side-panel forks)
 - [[gotchas]] — non-obvious traps (chat-as-completer, CSP, two tsconfigs)

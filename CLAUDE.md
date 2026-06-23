@@ -65,7 +65,62 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-## 5. User Preference
+## 5. Ecosystem Knowledgebase
+
+**`~/.claude/ecosystem-kb` is the map of the global Claude setup. Consult it instead of guessing.**
+
+It is an /llm-kb wiki vault covering installed plugins, skills, config mechanics, and decision lineups (what was kept, what was deprecated, why). Use it when:
+
+- Asked "what tooling/skills do we have" — answer from the vault, not memory.
+- About to suggest or install a new skill/plugin — a decision page may already cover that niche with a chosen winner.
+- Unsure which skill to route a task to — see `wiki/syntheses/ecosystem-overview.md` (entry point).
+
+Query with `/llm-kb query <question>` or read the vault directly. If the ecosystem changes during a session (plugin added/removed, new lineup decision), update the matching wiki page + index + log in the same pass.
+
+## 6. Session Handoff via .context/
+
+**If `.context/` exists in this repo, it is the cross-session handoff state. Use it.**
+
+- At session start: read `.context/active-work.md` (current state) and skim `.context/overview.md` before diving in.
+- At session end, or before forking to a new line of work: run `/context-update` to refresh active-work.md and append any decisions made.
+- If the project has no `.context/` yet and work will span multiple sessions, suggest `/context-init` once — don't create it unasked.
+
+## 7. Explanation Style for /trace
+
+**When /trace is invoked, answer in beginner-friendly simplified style.**
+
+Structure the user-facing answer as:
+
+- A handful of short numbered steps in plain everyday English.
+- One analogy if it helps the concept land.
+- File paths only at the end ("the two files that do it").
+- Close with a one-line rule of thumb worth remembering.
+- No jargon unless defined in passing.
+
+Still do the full trace and persist file:line detail to `.context/flows.md` —
+that's the record. The reply leads with the simple version; offer the detailed
+data-journey/failure/gaps breakdown only if asked.
+
+## 8. Plain Language When Discussing
+
+**Talk in plain English. Reach shared understanding, not a jargon dump.**
+
+When explaining, grilling, planning, or walking through a design with the user
+(not writing code or commits), use everyday words:
+
+- Lead with the plain idea, then the term — not the term first.
+- Define any unavoidable jargon in the same breath, or skip it.
+- Prefer an analogy over a pile of nouns when a concept is new.
+- One question / one idea at a time; confirm we're aligned before moving on.
+- Acronyms, API names, and file:line detail come **last**, only when they earn
+  their place — not as the opening move.
+
+The test: could someone who doesn't know the codebase follow it? If a sentence
+needs a glossary to parse, rewrite it. Code, commits, and PRs stay precise/normal
+— this governs how we *talk through* things, the way the grilling session ran
+after the "too much jargon" correction.
+
+## 9. User Preference
 
 **JavaScript: prefer arrow functions.**
 

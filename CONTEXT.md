@@ -133,6 +133,23 @@ The range Inquire rewrites — the current **selection**, or the whole current l
 when nothing is selected. Inquire replaces this span entirely (so it can add or
 delete lines), using the **whole file** as context.
 
+### Reaching Wisp from outside — the Bridge
+
+**Bridge**:
+A local OpenAI-compatible endpoint Wisp can expose so tools **outside** VS Code
+(e.g. the GitHub Copilot CLI) reach the **Provider catalog** as if it were one
+ordinary OpenAI backend. It faces **outward** — the mirror of the **LM Chat
+Provider**, which surfaces Wisp's models *inward* into VS Code's own chat. An
+external tool names a **Provider**; Wisp answers with that Provider's selected
+model, routing the request through the same path every other surface uses. The
+Bridge holds no credentials of its own: it carries a single local access secret
+so only an authorised local tool may use it, while the real **Provider** auth
+(API key or sign-in) is supplied by Wisp and **never leaves it** — to a backend
+the traffic is indistinguishable from Wisp's other surfaces. **Off by default**;
+the user turns it on. _Avoid_: calling the Bridge a **Provider** (a Provider is a
+backend Wisp talks *out* to; the Bridge is the door *in*), or implying an
+external tool ever sees your keys or sign-in tokens — they never do.
+
 ## Relationships
 
 - **Activity** has exactly two values: **Thinking** | **Idle**.
