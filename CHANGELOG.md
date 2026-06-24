@@ -4,6 +4,20 @@ All notable changes to **Wisp** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-06-24
+
+### Fixed
+
+- **Anthropic vision in native chat.** Image attachments are now forwarded to Claude as
+  Messages `image` content blocks. The provider advertised vision but silently dropped
+  attached images, so Claude saw an empty message. The Bridge path still drops images
+  (separate follow-up).
+
+### Changed
+
+- The Anthropic provider is now labelled **Anthropic** (was "Claude") in the side-panel
+  dropdown and the native-chat model picker — it is a provider name, not a model.
+
 ## [1.4.0] — 2026-06-24
 
 The Bridge (experimental): run external tools on your Wisp providers.
