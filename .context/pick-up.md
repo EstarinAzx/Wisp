@@ -9,29 +9,33 @@ tags: [context, pick-up]
 
 **Start:** read `.context/overview.md` + `.context/active-work.md` to rehydrate, then continue below.
 
-## What just finished (this session — investigation only, NO code change)
-- **Anthropic native-chat vision: confirmed working, no bug.** A user reported "inconsistent" image
-  blindness. Added a temporary boundary probe in `chatProvider.ts`, watched the live output: every
-  request carries the `image` block with real base64 bytes and Claude reads it (F5, real PNGs —
-  single-turn, multi-turn, multi-image). The v1.4.1 fix (`7dfa8b0`) was already correct.
-- **The "can't see image" cases were Copilot agent mode** — when the chat runs tools first (workspace
-  search / MCP "AI Research Assistant"), the model answers off tool results and claims "empty" though
-  the image is in context. Chat/model behavior, not a Wisp wire drop. Some early failures were also
-  plain Copilot chat, not the Wisp provider.
-- **Probe fully removed** — `git diff src/chatProvider.ts` is empty (== HEAD). 237 tests green, compile clean.
-- **Uninstalled the stale local extension** `local.opencode-autocomplete@0.0.4` (the F5 dup trap; the
-  real id, not the `local.wisp` earlier notes guessed — gotchas corrected).
-- **Only `.context/` docs changed this session** (this update). v1.4.1 is fully shipped: pushed,
-  released as Latest, `wisp-1.4.1.vsix` attached.
+## What this session established (investigation only — NO code change landed)
+- **Vision wire is correct.** v1.4.1 fix (`7dfa8b0`) verified end-to-end with a temporary probe: every
+  captured request carried the `image` block with real base64; Claude read it (F5, real PNGs;
+  single/multi-turn/multi-image). Confirmed the **shipped `wisp-1.4.1.vsix` bytes** contain the fix — the
+  artifact is NOT stale. v1.4.1 stays shipped (pushed, released Latest, vsix attached). No rollback.
+- **OPEN: agent-mode vision is intermittent.** Same image/model/build, Copilot agent mode sometimes says
+  "attachment empty" — but also succeeds in agent mode sometimes (so NOT a clean Ask-vs-Agent split).
+  Earlier "resolved / just model behavior" was an over-claim, corrected.
+- **The probe was reverted** — `git diff src/chatProvider.ts` is empty (== HEAD). Tests green, compile clean.
 
-## Next task → nothing forced
-No release pending — v1.4.1 already out and code is unchanged since. Optional follow-ups in
-`active-work.md` (Bridge image follow-up, close PRD #34, Copilot catalog token-window warning).
+## Next task → pin the agent-mode flake (only if pursuing it)
+The decisive datum was never captured (every probe log caught was a *success* turn). To resolve:
+1. Re-add the two probes in `chatProvider.ts` `provideLanguageModelChatResponse` (see [[active-work]]
+   Open questions for the exact shape: incoming `turns/images/last` line + `OUT` body-shape line).
+2. Uninstall any installed Wisp first (dup trap), F5, agent mode, Anthropic model.
+3. Reproduce until the model answers "empty"; read the pair for THAT turn:
+   - `images=0` → VS Code dropped the image on that turn (host bug, not ours).
+   - `images≥1` + no `image(...)` in `OUT` → our builder dropped it → **our bug, fix it**.
+   - `images≥1` + `OUT` has `image(…b64)` → sent correct, model ignored it (model/host behavior).
+4. Remove the probe again when done.
+
+Not pursuing it is fine — Ask mode reads images reliably; only agent mode is flaky.
 
 ## Landmines
-- **Don't cut a 1.4.2 expecting a vision fix** — nothing functional changed; it'd be byte-identical to 1.4.1.
-- **Before any F5:** uninstall the stale local extension (`code --list-extensions | grep -E 'wisp|opencode'`,
-  then uninstall) and open a NEW terminal after Start. See [[gotchas]].
+- **Don't re-release / bump for "the vision fix"** — nothing functional changed; 1.4.1 is already correct & out.
+- **Before any F5:** uninstall the installed Wisp (`code --list-extensions | grep -E 'wisp|opencode'`, then
+  uninstall) — the dup trap serves a stale panel. New terminal after Start. See [[gotchas]].
 - `.context/flows.md` is untracked and **not mine** — leave it out of commits.
 
 ## Related

@@ -11,15 +11,20 @@ _Last updated: 2026-06-24 by Opus 4.8 (auto)._
 _At commit: `c3b603c` on `main` (v1.4.1 released; this session was investigation-only, no code change)._
 
 ## Current focus
-**Vision is confirmed working — there was no bug.** A user reported Anthropic native chat
-"inconsistently" not seeing images. Investigated with a temporary boundary probe (added then
-removed; net zero code change). The v1.4.1 fix (`7dfa8b0`) is correct end-to-end: every request
-carries the `image` block with real base64 bytes, and Claude reads it (confirmed live, F5, real
-PNGs). The "can't see image" cases were **Copilot agent mode** — when the chat runs tools first
-(workspace search / MCP), the model answers off the tool results and claims "empty" even though the
-image is in context. That's chat/model behavior, not a Wisp wire drop. Some early failures were also
-plain Copilot chat, not the Wisp provider. **v1.4.1 is fully shipped** (pushed, released as Latest,
-`wisp-1.4.1.vsix` attached).
+**Vision wire is correct; agent-mode reliability is an OPEN question.** A user reported Anthropic
+native chat "inconsistently" not seeing images. Investigated with a temporary boundary probe (added,
+used, removed — net zero code change). Proven: the v1.4.1 fix (`7dfa8b0`) is correct on the wire —
+every captured request carried the `image` block with real base64 bytes, and Claude read it (F5 +
+real PNGs, single/multi-turn/multi-image). Verified the **shipped `wisp-1.4.1.vsix` bytes** contain
+the fix (`catalog.js` image block, `chatProvider.js` forwards `images`) — the artifact is NOT stale.
+
+**Unresolved:** images are **intermittent in Copilot agent mode** — same image/model/build, the model
+sometimes answers "attachment empty." NOT cleanly Ask-vs-Agent (a success was confirmed in agent mode
+too). Root cause NOT pinned: could be VS Code dropping the image on tool-planning turns, or the model
+not attending mid-tool-loop. **The decisive datum was never captured** — every probe log caught was a
+*success* turn; need a log at the exact "empty" moment (see Pick up here). Earlier "it's resolved /
+just model behavior" was an over-claim — corrected. **Ask mode is reliable; v1.4.1 stays shipped, no
+rollback.**
 
 ## State
 - **Done this session (all on `main`):**
@@ -54,9 +59,15 @@ Nothing forced — vision is resolved, v1.4.1 is out. Optional follow-ups, rough
 - /preset pick-up — resume from this note.
 
 ## Open questions
-- ~~Live vision round-trip not yet F5-proven.~~ **RESOLVED 2026-06-24** — F5 + real-PNG drag confirmed:
-  the outgoing body carries `image(<n>b64)` and Claude reads it (Python logo, etc.). Works single-turn,
-  multi-turn, and multi-image. The only non-working shape is agent-mode tool loops (model behavior).
+- **Agent-mode vision is intermittent — root cause NOT pinned (OPEN).** Plain/Ask mode reads images
+  reliably; agent mode sometimes answers "attachment empty" (same image/model/build, confirmed both a
+  success AND a failure in agent mode). To resolve: re-add the probe (incoming `images=` count + last-turn
+  part kinds + `OUT` body shape — both blocks were in `chatProvider.ts` `provideLanguageModelChatResponse`),
+  F5, reproduce a FAILURE, read the pair at the "empty" turn. `images=0` → VS Code dropped it on that turn
+  (host, not ours). `images≥1` + no `image(...)` in `OUT` → our builder dropped it (our bug → fix).
+  `images≥1` + `OUT` shows `image(…b64)` → sent correct, model ignored it (model/host behavior).
+- ~~Live vision round-trip not F5-proven.~~ RESOLVED — wire confirmed (image block leaves with real bytes,
+  Claude reads it) for non-agent turns.
 
 ## Recent context
 - **Vision is advertised per `VISION_FAMILIES`** ([catalog.ts:226](../src/catalog.ts#L226)) — Claude
