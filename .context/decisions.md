@@ -1,7 +1,7 @@
 ---
 type: decisions
 project: wisp
-updated: 2026-06-23
+updated: 2026-06-24
 tags: [context, decisions]
 ---
 
@@ -908,6 +908,263 @@ Marketplace publish.
 **Reversibility:** easy/additive (drop the two new modules + the toggle) — so **no ADR** (fails the
 "hard to reverse" bar). The embedded-vs-standalone choice is the load-bearing part; don't re-open it without
 re-reading the SecretStorage reason.
+
+## 2026-06-24 — Bridge #35: VS Code → Copilot CLI env-var passing (gate)
+**Decision (YES — Wisp can, and should, inject the vars itself):** VS Code does **not** automatically push
+custom env vars into a Copilot-CLI process spawned in its integrated terminal — a terminal inherits the
+extension-host/VS Code process environment (plus the user's login-shell env and any
+`terminal.integrated.env.<platform>` additions), and Wisp's BYOK vars are in none of those by default. The
+**sanctioned, Wisp-owned path is the `EnvironmentVariableCollection` API**: from `extension.ts`, use
+`context.environmentVariableCollection` (typed `GlobalEnvironmentVariableCollection`) and call `.replace(name, value)`
+for each of the five Copilot BYOK vars. Every integrated terminal created **after** the collection is set
+inherits them, so a Copilot CLI session started in a VS Code terminal is pointed at the Bridge with no user
+setup. This is path **(a)** from the PRD; it wins because it's automatic and lives in the same extension
+process that already owns the Bridge listener + secret.
+
+**The five vars to inject (verified against current GitHub Copilot CLI BYOK docs, 2026-06-24):**
+`COPILOT_PROVIDER_BASE_URL` (required — point at `http://127.0.0.1:<port>/v1`), `COPILOT_MODEL` (required — a
+Wisp Provider id), `COPILOT_PROVIDER_API_KEY` (the Bridge access secret), `COPILOT_PROVIDER_TYPE` (`openai` —
+the default; allowed `openai|azure|anthropic`), `COPILOT_OFFLINE=true` (skip GitHub's servers). All five are
+read from the **process environment**; the CLI also requires the model to support **tool calling + streaming**
+(Bridge already round-trips both). The PRD's names are **confirmed current**, not stale.
+
+**Wiring (exact API):** `context.environmentVariableCollection.replace('COPILOT_PROVIDER_BASE_URL', url)`, …×5.
+`replace` defaults to `{ applyAtProcessCreation: true }`. `.clear()` / `.delete(name)` to tear down when the
+Bridge toggles off. `.persistent` defaults **true** → the vars survive window reloads (the collection is cached
+and re-applied), so set it deliberately (likely keep true while the Bridge is on; clear on off). Set
+`.description` so the user sees *why* the env changed in the terminal-tab hover. For a per-folder scope,
+`environmentVariableCollection.getScoped({ workspaceFolder })` returns an isolated child collection applied
+after the global one — **not needed for v1** (global is correct; the Bridge is machine-wide).
+
+**Fallbacks (if the user prefers manual / for a terminal already open before the toggle):**
+(b) user adds the five vars to `terminal.integrated.env.<platform>` in settings.json; (c) user exports them in
+a shell and launches VS Code (or just the `copilot` process) from that shell. Both are documentation-only; (a)
+is the default Wisp ships.
+
+**Caveats (load-bearing):**
+- **Applies to terminals created AFTER the collection is set.** A Copilot CLI session running in a terminal
+  opened *before* Wisp set the vars will **not** see them — VS Code marks that terminal stale: per the Terminal
+  Advanced docs, "If an extension changes the terminal environment, any existing terminals will be relaunched
+  if it is safe to do so, otherwise a warning will show in the terminal status," with "A warning icon … next to
+  the terminal tab when a relaunch is required" and a relaunch button in the hover. Setup docs must tell the
+  user to **open a fresh terminal (or relaunch)** after enabling the Bridge.
+- The injected `COPILOT_PROVIDER_API_KEY` becomes visible to any process in that terminal (it's the Bridge's
+  own localhost secret — same local-proxy posture already accepted in the Bridge PRD, not a new exposure class).
+- A Copilot session in an **external** terminal (outside VS Code) is out of this mechanism's reach → that user
+  takes fallback (b)/(c). Matches the Bridge's "alive only while VS Code + Wisp run" tradeoff.
+
+**Why:** the Bridge listener + access secret already live in the extension host; injecting the vars from the
+same place is zero extra moving parts and needs no token porting or user copy-paste. Settings/shell paths put
+the burden on the user and can drift from the live port/secret.
+
+**Verdict derived from docs + the VS Code API (release/1.104, which Wisp already targets); live F5 round-trip
+(start Copilot CLI in a VS Code terminal, confirm it reaches the Bridge) is the pending final confirmation.**
+**Reversibility:** easy/additive — it's `replace`×5 on activate-or-toggle + `clear` on off; no ADR (consistent
+with the Bridge PRD entry's "no ADR" call). Sources: VS Code `vscode.d.ts` (`EnvironmentVariableCollection`,
+`GlobalEnvironmentVariableCollection.getScoped`, `ExtensionContext.environmentVariableCollection`); VS Code
+Terminal Advanced docs (relaunch/stale-env indicator); GitHub Copilot CLI "Using your own LLM models" (BYOK) docs.
+
+## 2026-06-24 — Bridge #36 built: the pure protocol translator (+ trust-boundary guards from review)
+**Decision:** Shipped slice #36 — `src/bridge.ts` + `src/bridge.test.ts`, a pure, vscode-free protocol
+translator joining the `catalog.ts` family (TDD, `npm test` **234 green**, tsc clean). Three jobs:
+- **Inbound** `parseOpenAiChatRequest(body)` → `{ model, stream, system, turns: NormalizedTurn[], tools: ToolSpec[] }`
+  — the inverse of `buildOpenAiChatMessages` (+ `toOpenAiTools`). **System is lifted OUT of `turns` into a
+  separate string** (every send-builder consumes system apart from the conversation — Codex `instructions`,
+  Anthropic top-level `system`, OpenAI re-prepend), so the value feeds each builder with no second mapping.
+  **Tool-result adjacency is inverted by buffering:** a run of `tool` messages is held and attached to the
+  next user turn's `toolResults` (or flushed as a bare tool-result user turn), mirroring how
+  `buildOpenAiChatMessages` emits tool messages BEFORE the user text.
+- **Outbound** `BridgeStreamEvent = {text} | {tool_call}` → OpenAI `chat.completion.chunk` emitters
+  (`textChunk`/`toolCallChunk`/`finalChunk`), `sseLine` wire form, `SSE_DONE`. **Tool calls are folded WHOLE**
+  (one delta per call, full args, distinct `index`) because Wisp's stream reducers assemble calls before
+  surfacing them — valid OpenAI shape, just not fragment-streamed. `finish_reason` = `tool_calls` if any call
+  emitted else `stop`. Deterministic — `ChunkMeta {id,model,created}` is injected (no `Date.now()`/random here).
+- **Models** `buildModelsList(ChatModelInfo[])` → `{object:'list', data:[{id,object:'model',created:0,owned_by:'wisp'}]}`.
+
+**Trust-boundary guards (added after a 15-agent adversarial review of the diff before landing):** the review
+confirmed 5 of 11 raw findings — all robustness, none a happy-path bug. `parseOpenAiChatRequest` parses an
+UNTRUSTED external HTTP body, yet four spots dereferenced it blindly while the module's own doc comment claimed
+it "never trusts the inbound body to be well-formed." Fixed (TDD: 5 new malformed-input tests + 1 parallel-
+tool_calls coverage test): a missing/non-array `messages` → empty turns; non-iterable user `content`
+(null/number/object) → empty-text turn; a `tool_call`/`tools` entry with no `function` → empty name/args;
+unknown or partial content parts (a real OpenAI `input_audio` part, a url-less `image_url`) → skipped. All
+**degrade, never throw** — so the #37 listener can map a parse-that-yields-nothing to a deliberate 400 rather
+than catching a stray `TypeError`.
+**Why guard now (not defer to #37):** the comment already advertised the robustness (comment-and-code are
+peers — it must not lie), the fixes are ~5 lines in the file's existing degrade-don't-throw style, and
+trust-boundary input validation is the one thing not worth deferring. `catalog.ts` was **NOT** touched —
+every reused type was already exported (`NormalizedTurn`, `ToolSpec`, `AssembledToolCall`, `ChatModelInfo`);
+the only locally-defined type is the inbound OpenAI request shape (no catalog equivalent — catalog models
+only the *outbound* message).
+**Unblocks #37** (listener + key-based skeleton): #35 + #36 were its two prerequisites.
+**Reversibility:** easy/additive — the translator is two new files; drop them to remove. The guards are
+load-bearing — don't strip them; the listener relies on a non-throwing parse.
+
+## 2026-06-24 — Bridge #37 built: the HTTP listener + keyed walking skeleton (live-verified)
+**Decision:** Shipped slice #37 — `src/bridgeServer.ts` (impure glue over the pure `bridge.ts`) + wiring in
+`src/extension.ts` + a `wisp.bridge.port` setting (machine-scoped, default `41184`) + a `wisp.bridgeToggle`
+command. The listener binds `127.0.0.1`, enforces the access-secret Bearer on **every** request
+(constant-time `crypto.timingSafeEqual` with a length guard), routes `POST /v1/chat/completions` and
+`GET /v1/models`, and is **glue → F5-verified, not unit-tested** (per the PRD; the genuinely-new logic is the
+already-tested `bridge.ts`). Built on node's `http` stdlib — **no web-framework dependency**. The seam mirrors
+`chatProvider.ts`'s `ChatProviderDeps` (providers + model-map/baseUrl getters + async key/client resolvers);
+`extension.ts` owns secrets, the listener reads none. Send path = the existing OpenAI SDK
+(`client.chat.completions.create`, `stream:true`), with **system re-prepended** (the translator keeps it out
+of `turns`), then rendered back through `bridge.ts`'s SSE emitters; tool-call fragments are collected and
+`assembleToolCalls`-folded exactly as the LM Chat Provider path does.
+
+**Two scoping choices worth recording:**
+- **A non-streaming path was added beyond the pure translator.** `bridge.ts` is deliberately streaming-only
+  (SSE emitters). When a client sends `stream:false`, the listener drains the same upstream stream and answers
+  one `chat.completion` object (the aggregate envelope is glue, ~12 lines, in `bridgeServer.ts` — `bridge.ts`
+  stays pure-streaming). Rationale: it closes a real foot-gun (a client or plain curl sending `stream:false`
+  would otherwise get a broken SSE reply), at trivial cost. The PRD's acceptance is SSE-only; this is a
+  correctness superset, not a scope expansion of the pure module.
+- **Keyed Providers only; the secret is a temp constant; a palette command drives the toggle.** Codex/Anthropic
+  deliberately return `400 not yet reachable` (their send-paths are #39/#40). The access secret is a constant
+  (`BRIDGE_ACCESS_SECRET` in `extension.ts`) and `wisp.bridgeToggle` shows the address+secret in a toast — both
+  are #37 test scaffolding; the auto-generated SecretStorage secret + panel switch + copy button are **#38**.
+  The panel switch will call the same `bridge.start()/stop()` — no fork.
+
+**Untrusted-body posture at the listener (the trust boundary):** the body is `JSON.parse`'d (parse failure →
+**400**), then `parseOpenAiChatRequest` (which degrades, never throws) — a parse that yields no turns is mapped
+to a deliberate **400**, not a caught `TypeError`. Body size is capped (25MB) so a malformed/huge body can't
+exhaust host memory. Client disconnect aborts the upstream call via `AbortController`.
+
+**Verification:** `tsc` clean; **234 tests still green**; a 16-check standalone smoke (fake OpenAI client, real
+HTTP) covered auth/routing/SSE-shape/non-stream/400/404; and a **live F5 round-trip** streamed a real reply
+through `opencode-go` (text deltas → `finish_reason:stop` → `[DONE]`, model echoed as the provider id).
+**Unblocks #38** (panel UI + generated secret + env-var injection), then #39/#40.
+**Reversibility:** easy/additive — one new file + a handful of wiring lines; drop them to remove. No ADR
+(consistent with the Bridge PRD's "additive, easy to drop" call).
+
+## 2026-06-24 — Bridge #38 built: panel control + generated secret + COPILOT_* env injection
+**Decision:** Shipped slice #38 — the side-panel Bridge control, the real access secret, and the #35 env
+injection, all in the three existing files (`extension.ts`, `sidePanelProvider.ts`, `webview/app.tsx`); no
+`package.json` change (the `wisp.bridgeToggle` command + `wisp.bridge.port` setting already existed from #37).
+- **Secret:** the #37 temp constant `BRIDGE_ACCESS_SECRET` is gone. `ensureBridgeSecret()` generates a
+  `randomBytes(32)` base64url secret **once**, stores it in SecretStorage slot **`wisp.bridge.secret`**, and
+  reuses it thereafter (so a configured CLI keeps working across restarts — never regenerated each start). The
+  listener reads it via `accessSecret: () => bridgeSecret`, a module var materialized on start and reset to
+  `''` on stop (the listener's auth check is synchronous, so it can't `await` SecretStorage per request).
+- **One shared lifecycle, no fork:** `startBridge`/`stopBridge` are the single start/stop path; the palette
+  command and the panel switch both call them. `getState` exposes `bridgeRunning`/`bridgeAddress`/
+  `bridgeSecret` (secret only while running), and `bridgeToggle` pushes panel state after either trigger.
+- **Secret crosses the webview boundary, deliberately.** Unlike Provider keys (write-only across the boundary),
+  the Bridge secret is *shown* (as `type="password"`) with a Copy button while running — it's the Bridge's own
+  localhost secret and the user must copy it into the CLI. Copy is done **host-side** (`vscode.env.clipboard`),
+  since webview clipboard access is restricted. Consistent with the PRD's accepted localhost-secret posture.
+
+**The #35 env injection lands here (path (a) from the env-var decision above):** `injectCopilotEnv()` does
+`context.environmentVariableCollection.replace(...)` for the five `COPILOT_*` BYOK vars on start; `clear()` on
+stop. Two non-obvious calls worth recording:
+- **`clear()` on activate too, not only on stop.** The collection is `.persistent` by default, so VS Code
+  re-applies the previous session's vars on a window reload — but the Bridge always starts OFF, so without an
+  activate-time clear a new terminal would inherit a dead-port `BASE_URL` + a stale `API_KEY` while nothing is
+  listening. (Closes the gap the original env-var decision's "clear on off" left open across reloads.)
+- **`COPILOT_MODEL` re-synced on a mid-run Provider switch** (the `onDidChangeConfiguration` handler, guarded
+  by `bridge.isRunning()`) so the panel's choice stays the single source of truth (story 8). Only that one var
+  — `BASE_URL` stays bound to the running listener's port, not the (possibly newly-edited) `bridge.port`.
+
+**Known ceiling (accepted, not fixed):** `bridge.stop()`'s `server.close()` is async, so a fast stop→start
+(panel double-click) can hit `EADDRINUSE` before the OS frees the port. It self-heals (error toast + retry once
+freed); a `ponytail:` comment in `stopBridge` names the upgrade path (gate the toggle on a transition flag) if
+it ever bites. Surfaced by the `cavecrew-reviewer` pass, which also confirmed: no empty-secret bypass
+(`randomBytes` never empty + listener unbound when secret is `''`), no secret leak on the failed-start path
+(`getState` gates display on `isRunning()`), double-start guarded.
+
+**Verification:** `tsc` clean; **234 tests still green** (panel/secret/env are glue → F5-verified, not
+unit-tested, per the PRD); **live F5 smoke** — panel Start → an `Invoke-RestMethod` non-stream `POST` returned
+a real `chat.completion` through `opencode-go`. **Still pending:** the real Copilot-CLI-in-a-terminal confirm
+(the last unproven half of #35) — curl/`Invoke-RestMethod` proved the listener, not yet a CLI session.
+**Unblocks #39** (Codex send-path) and #40 (Anthropic).
+**Reversibility:** easy/additive — edits to three files; revert to restore #37's constant-secret state. No ADR.
+
+## 2026-06-24 — Bridge #39 built: Codex over the Bridge (pure reuse of the LM Chat Provider's Responses path)
+**Decision:** Made the `kind:'codex'` Provider reachable on `POST /v1/chat/completions` — it was returning
+`400 not yet reachable`. **No new auth or transport**: the Bridge's `handleCodexChat` (`src/bridgeServer.ts`)
+drives the **same cores the LM Chat Provider already uses** — `codexStream` (Responses-API SSE) with
+`codexAuth.current()` creds (sign-in + refresh), `standardEffortToCodex(effort)`, and
+`toCodexResponsesTools`. The only genuinely-new wiring is mapping the Bridge's normalized turns into the
+Codex request and the Codex stream events back through the translator. Two files:
+- `bridgeServer.ts`: `BridgeDeps` gained `codexCreds` / `codexSignedIn` / `effort`. The `handleChat` guard
+  split — `codex` → `handleCodexChat`, anthropic still `400` (#40). `/v1/models` now advertises `codex`
+  when **signed in** (`isCodexProvider(p) ? await deps.codexSignedIn() : …`), anthropic still forced false.
+  `handleCodexChat` renders text + assembled tool calls back through bridge.ts's existing
+  `textChunk`/`toolCallChunk`/`finalChunk` (or one `chat.completion` on `stream:false`) — **identical wire
+  shape to the keyed path**, so the translator is reused, not duplicated.
+- `extension.ts`: passed `codexAuth.isSignedIn` / `codexAuth.current` / `activeEffort` into
+  `createBridgeServer` (the exact getters `registerWispChatProvider` already receives).
+
+**Two load-bearing details:**
+1. **`parsed.system` is re-attached as a leading `role:'system'` message**, not passed separately — Codex
+   has no system *turn*; `buildCodexResponsesBody` folds any `role:'system'` message into `instructions`
+   (and defaults one when absent, so the backend's "Instructions are required" 400 can't fire). bridge.ts
+   deliberately keeps `system` out of `turns`, so the send-path must re-prepend it — mirrors the keyed
+   path's `[{role:'system'}, ...base]`.
+2. **Signed-out fails clean, never crashes** (acceptance #4): no creds → **401** before any upstream call;
+   a stream throw (refresh fail / mid-stream) → **502** (or just `end()` if the SSE head is already out).
+
+**Surgical call — keyed path untouched.** `handleCodexChat` duplicates ~12 lines of SSE-writing rather than
+refactoring the verified keyed path into a shared renderer. Rationale: zero regression risk to the
+F5-verified #37/#38 slice; the shared-renderer refactor (bridge.ts's `BridgeStreamEvent` was built for it)
+is deferred until #40 lands a third duplicate and the pattern is proven across all three. `ponytail`: take
+the refactor with #40, not speculatively now.
+
+**Verification:** `tsc` clean; **234 tests still green** (the send-path is glue → F5-verified, not
+unit-tested per the PRD; the mapping is a trivial field-rename, the real logic lives in the already-tested
+`codexStream`/`bridge.ts`); **live F5 smoke** — panel Provider=Codex, signed in, Bridge Start → an
+`Invoke-RestMethod` non-stream `POST` returned a real `chat.completion` from the **`codex`** Provider through
+the **ChatGPT subscription** (`finish_reason:stop`, model echoed as the provider id). **Still pending** (same
+as #38): a real **Copilot CLI session** over the Bridge (acceptance #5 + the long-outstanding #35 bullet),
+plus the signed-out-401 and tool-call edges live. **Unblocks #40** (Anthropic, the last send-path).
+**Reversibility:** easy/additive — edits to two files; revert to restore the codex `400`. No ADR.
+
+## 2026-06-24 — Anthropic over the Bridge (#40)
+
+**Decision:** Make `kind:'anthropic-oauth'` reachable on `POST /v1/chat/completions` by mirroring the #39
+Codex send-path exactly, swapping the Codex cores for the Anthropic ones: `handleAnthropicChat` drives
+`anthropicStream` (Messages SSE) on `anthropicAuth.current()` creds, **raw** `deps.effort()`, `toAnthropicTools`,
+with `parsed.system` re-attached as a leading `role:'system'` message. `/v1/models` and `handleChat` flip
+anthropic from the stub to live; `BridgeDeps` gains `anthropicSignedIn`/`anthropicCreds`, wired from the
+getters `registerWispChatProvider` already receives.
+
+**Why:** zero new auth/transport — reuse the exact cores the LM Chat Provider's Anthropic branch uses, so the
+only new code is the turn/stream mapping. Two details: effort is passed **raw** (Anthropic's body builder maps it
+via `anthropicThinkingEffort`; only Codex needs `standardEffortToCodex`), and **images are dropped** (matches
+`toAnthropicMessages`; Anthropic image support is a separate follow-up). The deferred shared-renderer refactor
+(flagged in the #39 entry as "take it with #40") was **declined** — a third near-identical block is cheap and the
+keyed/Codex paths are F5-verified; a renderer refactor now risks regression for no functional gain. `ponytail`.
+
+**Verification:** `tsc` clean, **234 tests green** (glue → not unit-tested per PRD), live `Invoke-RestMethod`
+`model:'anthropic'` → `finish_reason=stop` with real text through the Claude.ai subscription.
+**Reversibility:** easy/additive — revert to restore the anthropic `400`. No ADR.
+
+## 2026-06-24 — Copilot CLI shows the real model name, via active-Provider routing fallback (#b)
+
+**Decision:** Inject `COPILOT_MODEL` = the active Provider's **resolved model name** (`activeModel()`), not its
+Provider id, so Copilot CLI's UI shows the real model. To keep routing working, `handleChat` now routes a
+Provider **id** to that Provider (curl keeps explicit addressing) and **any other value** — notably the resolved
+model name Copilot sends — to the **active Provider** (`deps.activeProviderId()`, new `BridgeDeps` getter). The
+env label re-syncs on provider **or** model switch.
+
+**Why:** Copilot CLI renders `COPILOT_MODEL` **verbatim** as its model label and does not read the custom
+endpoint's `/v1/models`; the only lever for the label is that env var. Changing it to the model name forces the
+routing change. Chose the **loose** active-Provider fallback over a tight model-name match because the model name
+lives in the terminal env (fixed at launch) — a tight match would 404 after any mid-session model switch. The
+loose fallback keeps the model **used** live (`resolveModel` per request) while the **label** is a launch-time
+snapshot. Tradeoff accepted: (1) an unknown model no longer 404s — it serves the active Provider (fine for a
+local single-user endpoint); (2) running Copilot terminals now **follow the active Provider** (they send a model
+name, not an id) rather than being pinned to their launch Provider. curl addressing each Provider by id is
+preserved.
+
+**Verification:** `tsc` clean, **234 tests green**, full compile clean. Routing proven on the compiled
+`out/bridgeServer.js` via a node harness (3/3 HTTP cases) AND end-to-end with the **real `@github/copilot`
+v1.0.64 binary** — its JSON event stream reported `data.model:"minimax-m3"` (resolved name, not the id) and
+round-tripped through our Bridge (`apiCallId:chatcmpl-…`). The interactive `Current model:` banner is the human
+render of that same `data.model` field; the only step not run is a reload of the user's live Extension Host.
+**Reversibility:** easy — three small edits; revert `injectCopilotEnv` to `activeProvider().id` and drop the
+fallback to restore strict id-routing. No ADR.
 
 ## Related
 - [[overview]]

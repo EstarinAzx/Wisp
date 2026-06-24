@@ -14,7 +14,7 @@
  *     model ids, set model/provider/baseUrl, read state + Activity) — avoids a circular import.
  *   - Webview → ext messages: ready | setApiKey{value} | clearApiKey | selectModel{value}
  *     | selectProvider{value} | setBaseUrl{value} | refreshModels | codexSignIn | codexSignOut
- *     | selectEffort{value}.
+ *     | selectEffort{value} | bridgeToggle | copyBridgeSecret | copyBridgeAddress.
  *   - Ext → webview messages: state{state} | models{ids} | modelsError{message} | activity{thinking}.
  */
 
@@ -37,6 +37,9 @@ export type PanelState = {
   modelOptions?: string[]; // OAuth kinds only: curated model ids for the dropdown (no live /models route)
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; // Codex + Anthropic: the reasoning-effort knob (governs every call)
   effortOptions?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]; // per-model option list — host-computed so 'max' only shows for max-capable Claude (#32)
+  bridgeRunning: boolean; // Bridge listener state → the panel's running/stopped indicator + Start/Stop label
+  bridgeAddress: string; // http://127.0.0.1:<port> — shown so the user knows what to point the CLI at
+  bridgeSecret?: string; // the access secret, sent only while running (meant to be copied into the CLI)
 };
 
 // Shared with extension.ts so the no-key failure is recognizable as webview-safe text.
@@ -56,6 +59,9 @@ export type PanelHost = {
   anthropicSignIn: () => Promise<void>;
   anthropicSignOut: () => Promise<void>;
   setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max') => Promise<void>;
+  toggleBridge: () => Promise<void>; // start/stop the Bridge — the same lifecycle the command drives
+  copyBridgeSecret: () => Promise<void>; // copy the access secret to the clipboard (host-side, webview can't)
+  copyBridgeAddress: () => Promise<void>;
 };
 
 // ----------------------------- Error sanitizing ----------------------------- //
@@ -155,6 +161,16 @@ export class WispPanelProvider implements vscode.WebviewViewProvider {
         case 'selectEffort':
           // Constrain to the valid depths so a malformed message can't write a junk value ('max' added #32).
           if (msg.value === 'low' || msg.value === 'medium' || msg.value === 'high' || msg.value === 'xhigh' || msg.value === 'max') await this.host.setEffort(msg.value);
+          return;
+        case 'bridgeToggle':
+          // Start/stop the Bridge; the host pushes fresh state so the indicator + secret update.
+          await this.host.toggleBridge();
+          return;
+        case 'copyBridgeSecret':
+          await this.host.copyBridgeSecret();
+          return;
+        case 'copyBridgeAddress':
+          await this.host.copyBridgeAddress();
           return;
       }
     } catch (err) {

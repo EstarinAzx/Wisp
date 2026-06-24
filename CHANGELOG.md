@@ -4,6 +4,28 @@ All notable changes to **Wisp** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-06-24
+
+The Bridge (experimental): run external tools on your Wisp providers.
+
+### Added
+
+- **Bridge — an OpenAI-compatible endpoint for your providers (experimental).** A local
+  listener on `127.0.0.1` exposes the same backends *outward* as one ordinary OpenAI API,
+  so external tools — notably the **GitHub Copilot CLI** — can run on your Wisp providers,
+  including your **ChatGPT (Codex)** and **Claude.ai** subscriptions. Toggle it from the
+  side panel or **`Wisp: Toggle Bridge`**; every request needs the generated **access
+  secret** as a Bearer. Serves `GET /v1/models` and `POST /v1/chat/completions` (streaming
+  or not), routing by provider id and falling back to the Active Provider. (Issues #35–#40)
+- **Zero-setup Copilot CLI.** Terminals opened after the Bridge starts inherit `COPILOT_*`
+  environment variables that point the Copilot CLI straight at the Bridge.
+- **`wisp.bridge.port`** setting (default `41184`, machine-scoped) for the listener port.
+
+### Security
+
+- The Bridge binds `127.0.0.1` only (never a public interface); the access secret is
+  generated on start, stored in the OS keychain, and compared in constant time.
+
 ## [1.3.0] — 2026-06-23
 
 Your Claude.ai subscription is now a first-class backend — sign in, no API key.

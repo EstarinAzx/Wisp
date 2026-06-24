@@ -1,36 +1,39 @@
 ---
 type: pick-up
 project: wisp
-updated: 2026-06-23
+updated: 2026-06-24
 tags: [context, pick-up]
 ---
 
-# Pick up
+# Pick up here
 
-Start: read `.context/overview.md` + `.context/active-work.md` to rehydrate.
+**Start:** read `.context/overview.md` + `.context/active-work.md` to rehydrate, then continue below.
 
-**Last session (2026-06-23):** Docs-only — updated `README.md` for **v1.3.0** documenting the new
-Anthropic (Claude.ai OAuth) provider. Hero pitch now covers ChatGPT **or** Claude.ai subscription;
-three backend kinds (was two); new "Anthropic provider" table; **Wisp: Sign in/out of Claude** command
-rows; Effort added to the side-panel bullet; provider count 11→12; version 1.3.0. Also refreshed
-`overview.md` (count, three kinds, Anthropic modules in layout) + `active-work.md`. No code change.
-Release 1.3.0 itself (the full Anthropic provider #28–#32) was already merged to `main` at `6bb632e`.
+## What just finished (this session, branch `feat/bridge`, committed local — not pushed)
+- **#40 — Anthropic over the Bridge.** `handleAnthropicChat` (Messages SSE, `anthropicAuth` creds, raw effort,
+  `toAnthropicTools`). Live-verified: `model:'anthropic'` → `finish_reason=stop`.
+- **(b) — Copilot CLI shows the real model name.** `COPILOT_MODEL` = resolved model name; `handleChat` routes a
+  non-id model → the **active Provider** (`activeProviderId`). Verified end-to-end with the real `@github/copilot`
+  binary (`data.model:"minimax-m3"`).
+- The **Bridge is feature-complete** — keyed + codex + anthropic all reachable; Copilot-CLI happy path proven.
+- `tsc` clean, 234 tests green, full compile clean.
 
-**Next task:**
-1. **Tag `v1.3.0`** if missing — `git tag --list` to check; match the `v1.2.0` tag convention; consider
-   a GitHub release.
-2. **Subscription 1M-context-ceiling probe** — `anthropicModelCaps` (`src/catalog.ts`) advertises
-   model-spec 1M for Opus/Sonnet; if a long Claude.ai-OAuth chat 4xx/413s, the subscription path caps
-   lower (~200K?) → drop their `contextInput`. Small, isolated. See [[decisions]] (2026-06-23 #29 entry).
-3. **Anthropic image input** — deferred follow-up (tool-calling #30 shipped; images stay deferred).
+## Next task → **Ship + release**
+1. `/preset ship` — push `feat/bridge`, open the PR (commit is local only). PR body covers #40 + (b).
+2. **Release the Bridge** (closes PRD **#34**, the only other open issue): bump version (1.3.0 → ~1.4.0),
+   update `CHANGELOG.md` + `README.md` (Bridge + Copilot-CLI BYOK setup), package the vsix.
+3. **Optional follow-up** (small, same `injectCopilotEnv` touch point): inject
+   `COPILOT_PROVIDER_MAX_PROMPT_TOKENS` / `COPILOT_PROVIDER_MAX_OUTPUT_TOKENS` from real model caps to kill
+   Copilot's `not in the built-in catalog` token-window warning.
 
-**Landmines / things to know:**
-- **`CLAUDE.md` is uncommitted** (pre-existing, unrelated) — keep it out of doc commits unless asked.
-- **README is router-first** (since v1.1.0) — Inquire is the secondary surface; don't reframe Inquire-first.
-- **Effort is two independent capabilities** — `max` = Opus 4.6/4.7/4.8, `xhigh` = Opus 4.7/4.8. Picker
-  over-offers, wire clamps (`anthropicThinkingEffort`). Source: openclaude `src/utils/effort.ts`. [[gotchas]].
-- **The #28 fingerprint contract is load-bearing** — samples first-user-message TEXT only, never body fields.
-- **Before any F5:** uninstall `local.wisp` (stale-panel collision). See [[gotchas]].
+## Landmines
+- **Provider switch needs a NEW terminal; model/effort are live.** Copilot label = launch snapshot; model used is
+  live. Running terminals now follow the **active** Provider (loose routing fallback). See [[gotchas]].
+- **Standalone GUI Copilot app does NOT use the Bridge** — terminal env only. Use `copilot` in a new terminal.
+- **PowerShell:** `Invoke-RestMethod`, not `curl.exe`; `message=;` is display collapse — read
+  `.choices[0].message.content`.
+- **Anthropic streaming + tool-calls not explicitly live-run** (only non-stream text). Low risk; confirm if paranoid.
+- `.context/flows.md` is untracked and **not mine** — left out of this commit.
 
-Full state in [[active-work]]; verified design in [[oauth-recon]]; contracts in [[decisions]] (2026-06-23);
-traps in [[gotchas]]; domain language in `CONTEXT.md`.
+## Related
+- [[active-work]] · [[api]] · [[decisions]] · [[gotchas]]

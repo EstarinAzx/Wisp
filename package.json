@@ -2,7 +2,7 @@
   "name": "wisp",
   "displayName": "Wisp",
   "description": "BYOK model router for VS Code's Copilot chat, agent, and Ctrl+I — bring your own API keys or ChatGPT (Codex) subscription. Plus Inquire inline edits.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "publisher": "EsarinAzx",
   "repository": {
     "type": "git",
@@ -74,6 +74,10 @@
       {
         "command": "wisp.anthropicSignOut",
         "title": "Wisp: Sign out of Claude"
+      },
+      {
+        "command": "wisp.bridgeToggle",
+        "title": "Wisp: Toggle Bridge"
       }
     ],
     "menus": {
@@ -137,6 +141,12 @@
           "type": "number",
           "default": 0.1,
           "description": "Sampling temperature. Low keeps edits deterministic."
+        },
+        "wisp.bridge.port": {
+          "type": "number",
+          "scope": "machine",
+          "default": 41184,
+          "description": "Port the Bridge listener binds on 127.0.0.1 (the local OpenAI-compatible endpoint external tools point at). Machine-scoped so a workspace cannot move the listener. Change it if the default clashes with another local service."
         }
       }
     }
