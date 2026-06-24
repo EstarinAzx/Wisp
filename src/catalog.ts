@@ -871,6 +871,7 @@ export type AnthropicMessage = {
   content: string;
   toolCalls?: { id: string; name: string; argsJson: string }[];
   toolResults?: { callId: string; content: string }[];
+  images?: { mimeType: string; dataBase64: string }[];
 };
 
 // An Anthropic Messages tool definition. Unlike Codex's strict Responses tools, Anthropic accepts a plain
@@ -962,10 +963,14 @@ export const buildAnthropicMessagesBody = (args: {
       for (const tc of m.toolCalls) blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: parseToolInput(tc.argsJson) });
       return { role: 'assistant' as const, content: blocks };
     }
-    if (!m.toolResults?.length) return { role: 'user' as const, content: m.content };
-    // tool_result blocks lead so the assistant(tool_use) → tool_result order the API wants holds.
+    const images = m.images ?? [];
+    // A plain text turn (no tool results, no images) stays a bare string (the #29 shape).
+    if (!m.toolResults?.length && !images.length) return { role: 'user' as const, content: m.content };
     const blocks: unknown[] = [];
-    for (const tr of m.toolResults) blocks.push({ type: 'tool_result', tool_use_id: tr.callId, content: tr.content });
+    // tool_result blocks lead so the assistant(tool_use) → tool_result order the API wants holds.
+    for (const tr of m.toolResults ?? []) blocks.push({ type: 'tool_result', tool_use_id: tr.callId, content: tr.content });
+    // Images before the text — Anthropic's recommended ordering for vision turns.
+    for (const img of images) blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mimeType, data: img.dataBase64 } });
     if (m.content) blocks.push({ type: 'text', text: m.content });
     return { role: 'user' as const, content: blocks };
   });

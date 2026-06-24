@@ -93,11 +93,11 @@ const toCodexMessages = (messages: readonly vscode.LanguageModelChatRequestMessa
   messages.map(normalizeTurn)
     .map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
-// Native chat turns → Anthropic Messages turns: role, text, and the agent round-trip — the tool calls a
-// turn made and the tool results it carries (#30). buildAnthropicMessagesBody expands those into tool_use /
-// tool_result content blocks. Images are still dropped here (a separate follow-up, not #30's scope).
+// Native chat turns → Anthropic Messages turns: role, text, any attached images (expanded into `image`
+// content blocks), and the agent round-trip — the tool calls a turn made and the tool results it carries
+// (#30). buildAnthropicMessagesBody expands those into tool_use / tool_result / image content blocks.
 const toAnthropicMessages = (messages: readonly vscode.LanguageModelChatRequestMessage[]) =>
-  messages.map(normalizeTurn).map((t) => ({ role: t.role, content: t.text, toolCalls: t.toolCalls, toolResults: t.toolResults }));
+  messages.map(normalizeTurn).map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
 
 // ----------------------------- Provider ----------------------------- //
 

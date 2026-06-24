@@ -566,3 +566,43 @@ describe('buildAnthropicMessagesBody — tools', () => {
     });
   });
 });
+
+describe('buildAnthropicMessagesBody — images', () => {
+  // An image-bearing user turn becomes a content-block array: the image block (base64 source) before the
+  // text block (Anthropic's recommended vision ordering). Was silently dropped before — the screenshot bug.
+  it('serializes an image user turn as image-then-text blocks', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'do u see this image?', images: [{ mimeType: 'image/png', dataBase64: 'AAAA' }] },
+    ] }) as any;
+    expect(body.messages[0]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+        { type: 'text', text: 'do u see this image?' },
+      ],
+    });
+  });
+
+  // An image with no accompanying prose emits just the image block — no empty text block (Anthropic rejects it).
+  it('omits the text block for an image-only user turn', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: '', images: [{ mimeType: 'image/jpeg', dataBase64: 'BBBB' }] },
+    ] }) as any;
+    expect(body.messages[0]).toEqual({
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBB' } }],
+    });
+  });
+
+  // tool_result must still lead; images and text follow it on the same user turn.
+  it('orders tool_result before image before text on one user turn', () => {
+    const body = buildAnthropicMessagesBody({ model: 'm', maxTokens: 1, version: 'v', messages: [
+      { role: 'user', content: 'and this?', toolResults: [{ callId: 'toolu_1', content: 'done' }], images: [{ mimeType: 'image/png', dataBase64: 'CCCC' }] },
+    ] }) as any;
+    expect(body.messages[0].content).toEqual([
+      { type: 'tool_result', tool_use_id: 'toolu_1', content: 'done' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCC' } },
+      { type: 'text', text: 'and this?' },
+    ]);
+  });
+});
