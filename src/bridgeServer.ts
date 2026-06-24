@@ -26,12 +26,14 @@ import * as http from 'http';
 import * as crypto from 'crypto';
 import type OpenAI from 'openai';
 import {
-  Provider, resolveModel, buildOpenAiChatMessages, toOpenAiTools, assembleToolCalls, buildChatModelInfos,
-  isCodexProvider, isAnthropicProvider, type ToolCallDelta,
+  Provider, resolveModel, resolveBaseUrl, buildOpenAiChatMessages, toOpenAiTools, toCodexResponsesTools,
+  assembleToolCalls, buildChatModelInfos, standardEffortToCodex, isCodexProvider, isAnthropicProvider,
+  type ToolCallDelta, type AssembledToolCall, type CodexCreds, type EffortLevel,
 } from './catalog';
+import { codexStream } from './codexClient';
 import {
   parseOpenAiChatRequest, buildModelsList, textChunk, toolCallChunk, finalChunk, sseLine, SSE_DONE,
-  type ChunkMeta, type FinishReason,
+  type ChunkMeta, type FinishReason, type BridgeChatRequest,
 } from './bridge';
 
 // ----------------------------- Dependencies ----------------------------- //
@@ -44,6 +46,11 @@ export type BridgeDeps = {
   customBaseUrl: () => string;                                    // wisp.baseUrl (only Custom resolves from it)
   keyFor: (provider: Provider) => Promise<string>;                // resolved key, '' when none — gates /v1/models
   clientFor: (provider: Provider) => Promise<OpenAI | undefined>; // built {baseUrl, key} client, undefined when keyless
+  // Codex has no API key — it is "usable when signed in". These two feed the codex path (#39): the signed-in
+  // flag gates the /v1/models row, current() returns the refreshed OAuth bundle for the Responses stream.
+  codexSignedIn: () => Promise<boolean>;
+  codexCreds: () => Promise<CodexCreds | undefined>;
+  effort: () => EffortLevel;                                      // the panel's reasoning Effort — same value the chat path + Inquire use
   port: () => number;                                             // 127.0.0.1 listen port (wisp.bridge.port)
   accessSecret: () => string;                                     // required Bearer on every request
   log: (message: string) => void;
@@ -109,18 +116,71 @@ const buildCompletion = (meta: ChunkMeta, text: string, calls: { id: string; nam
 export const createBridgeServer = (deps: BridgeDeps) => {
   let server: http.Server | undefined;
 
-  // GET /v1/models — the usable Provider ids. Keyed = has a key; Codex/Anthropic stay hidden until their send
-  // paths land (#39/#40), so they are forced false here. caps is omitted: the list only needs ids, so the
-  // conservative default windows are fine (no models.dev fetch to stall on).
+  // GET /v1/models — the usable Provider ids. Keyed = has a key; Codex is usable when signed in (#39);
+  // Anthropic stays hidden until its send path lands (#40), so it is forced false here. caps is omitted: the
+  // list only needs ids, so the conservative default windows are fine (no models.dev fetch to stall on).
   const handleModels = async (res: http.ServerResponse): Promise<void> => {
     const keyedPairs = await Promise.all(deps.providers.map(async (p) =>
-      [p.id, isCodexProvider(p) || isAnthropicProvider(p) ? false : !!(await deps.keyFor(p))] as const));
+      [p.id, isCodexProvider(p) ? await deps.codexSignedIn()
+        : isAnthropicProvider(p) ? false : !!(await deps.keyFor(p))] as const));
     const infos = buildChatModelInfos(deps.providers, {
       keyed: Object.fromEntries(keyedPairs),
       modelMap: deps.modelMap(),
       customBaseUrl: deps.customBaseUrl(),
     });
     sendJson(res, 200, buildModelsList(infos));
+  };
+
+  // POST /v1/chat/completions for the `codex` Provider — the Responses stream behind the ChatGPT sign-in,
+  // rendered back through the SAME bridge.ts SSE emitters the keyed path uses (so the wire shape is identical).
+  // No API key: creds come from the OAuth seam (codexAuth via deps), so a signed-out state is a clean 401, not
+  // a crash. Mirrors chatProvider.ts's Codex branch — only the in/out edges differ (HTTP body, not vscode parts).
+  const handleCodexChat = async (parsed: BridgeChatRequest, provider: Provider, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+    const creds = await deps.codexCreds();
+    if (!creds) return sendError(res, 401, `provider '${provider.id}' is not signed in`);
+
+    const modelId = resolveModel(deps.modelMap(), provider);
+    const baseUrl = resolveBaseUrl(provider, deps.customBaseUrl());
+    // bridge.ts lifts system OUT of the turns; Codex consumes it as `instructions`, so re-attach it as the
+    // leading system message buildCodexResponsesBody folds into instructions (its only role:'system' source).
+    const turns = parsed.turns.map((t) => ({ role: t.role, content: t.text, images: t.images, toolCalls: t.toolCalls, toolResults: t.toolResults }));
+    const messages = parsed.system ? [{ role: 'system' as const, content: parsed.system }, ...turns] : turns;
+    const tools = toCodexResponsesTools(parsed.tools);
+
+    const controller = new AbortController();
+    req.on('close', () => controller.abort());
+
+    const meta: ChunkMeta = { id: `chatcmpl-${crypto.randomBytes(12).toString('hex')}`, model: parsed.model, created: Math.floor(Date.now() / 1000) };
+    // codexStream yields text fragments live and the assembled tool calls at stream end (whole), so unlike the
+    // chat-completions path there are no fragments to reduce — collect the calls and emit each as one chunk.
+    const calls: AssembledToolCall[] = [];
+    try {
+      const upstream = codexStream({ creds, baseUrl, model: modelId, messages, effort: standardEffortToCodex(deps.effort()), tools, toolChoice: 'auto', signal: controller.signal });
+      if (parsed.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+        for await (const ev of upstream) {
+          if (ev.type === 'text') { if (ev.value) res.write(sseLine(textChunk(ev.value, meta))); }
+          else calls.push(ev.call);
+        }
+        calls.forEach((call, i) => res.write(sseLine(toolCallChunk(call, i, meta))));
+        res.write(sseLine(finalChunk(calls.length ? 'tool_calls' : 'stop', meta)));
+        res.write(SSE_DONE);
+        res.end();
+      } else {
+        // Non-streaming client: drain the same stream into one chat.completion object.
+        let text = '';
+        for await (const ev of upstream) {
+          if (ev.type === 'text') text += ev.value;
+          else calls.push(ev.call);
+        }
+        sendJson(res, 200, buildCompletion(meta, text, calls));
+      }
+    } catch (err) {
+      if (controller.signal.aborted) { res.end(); return; } // client hung up — normal, not a failure
+      deps.log(`[bridge] error ${provider.id} ${String(err)}`);
+      // A signed-out / refresh-failed Codex throws here — a clean 502 (or end if the SSE head is already out).
+      if (res.headersSent) res.end(); else sendError(res, 502, `provider request failed: ${String(err)}`);
+    }
   };
 
   // POST /v1/chat/completions — parse → route to a keyed Provider → send via the OpenAI SDK → render the reply
@@ -136,8 +196,9 @@ export const createBridgeServer = (deps: BridgeDeps) => {
 
     const provider = deps.providers.find((p) => p.id === parsed.model);
     if (!provider) return sendError(res, 404, `unknown provider '${parsed.model}'`);
-    // Keyed Providers only this slice — the subscription kinds get their own streams in #39/#40.
-    if (isCodexProvider(provider) || isAnthropicProvider(provider)) return sendError(res, 400, `provider '${provider.id}' is not yet reachable over the Bridge`);
+    // Codex routes through its Responses stream (#39); Anthropic still awaits its Messages stream (#40).
+    if (isCodexProvider(provider)) return handleCodexChat(parsed, provider, req, res);
+    if (isAnthropicProvider(provider)) return sendError(res, 400, `provider '${provider.id}' is not yet reachable over the Bridge`);
     const client = await deps.clientFor(provider);
     if (!client) return sendError(res, 400, `provider '${provider.id}' has no API key configured`);
 

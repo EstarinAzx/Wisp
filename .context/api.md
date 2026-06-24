@@ -53,14 +53,20 @@ model-map/baseUrl getters + async `keyFor`/`clientFor`); `extension.ts` owns sec
   `COPILOT_OFFLINE=true`. Cleared on stop **and on activate** (the collection is `.persistent` by default, Bridge
   starts OFF). Existing terminals stay stale until relaunched — see [[gotchas]].
 - **`POST /v1/chat/completions`:** `parseOpenAiChatRequest` (untrusted body → **400** on bad JSON or no turns) →
-  resolve the `model` field as a **Provider id** → its `resolveModel` model → existing OpenAI SDK
-  `chat.completions.create` (`stream:true`, system re-prepended) → reply via `bridge.ts` SSE emitters, OR one
-  aggregated `chat.completion` object when the client sent `stream:false`. Tool calls assembled whole. **Keyed
-  Providers only** this slice — `codex`/`anthropic` → `400 not yet reachable` (#39/#40).
-- **`GET /v1/models`:** `buildModelsList(buildChatModelInfos(...))` — the usable **keyed** Provider ids
-  (`{id, object:'model', created:0, owned_by:'wisp'}`); Codex/Anthropic forced out until their send-paths land.
-- **Not unit-tested** (glue → F5/manual per PRD); the genuinely-new logic is the unit-tested `bridge.ts`. See
-  [[decisions]] 2026-06-24 and the PowerShell test trap in [[gotchas]].
+  resolve the `model` field as a **Provider id** → its `resolveModel` model → send. Routing by Provider kind:
+  - **keyed** (openai-chat) → OpenAI SDK `chat.completions.create` (`stream:true`, system re-prepended).
+  - **`codex`** (#39) → `handleCodexChat`: `codexStream` (Responses SSE) on `codexAuth.current()` creds +
+    `standardEffortToCodex(effort)` + `toCodexResponsesTools`, `parsed.system` re-attached as a leading
+    `role:'system'` message (→ `instructions`). No creds → **401**; stream throw → **502**.
+  - **`anthropic`** → still `400 not yet reachable` (#40).
+  Either path renders back through `bridge.ts`'s SSE emitters, OR one aggregated `chat.completion` object when
+  the client sent `stream:false`. Tool calls assembled whole. The Codex send-path reuses the **same wire shape**
+  (`textChunk`/`toolCallChunk`/`finalChunk`) as the keyed path, not a second renderer.
+- **`GET /v1/models`:** `buildModelsList(buildChatModelInfos(...))` — the usable Provider ids
+  (`{id, object:'model', created:0, owned_by:'wisp'}`): keyed = has a key, **`codex` = signed in** (#39),
+  `anthropic` forced out until #40.
+- **Not unit-tested** (glue → F5/manual per PRD); the genuinely-new logic is the unit-tested `bridge.ts` +
+  `codexStream`. See [[decisions]] 2026-06-24 (#39 Codex send-path) and the PowerShell test trap in [[gotchas]].
 
 ## External API consumed — OpenCode (`go` + `zen`)
 - Two endpoints of the same OpenCode account (one Bearer key): **Go** `https://opencode.ai/zen/go/v1` (budget) and **Zen** `https://opencode.ai/zen/v1` (premium). Both OpenAI-compatible.

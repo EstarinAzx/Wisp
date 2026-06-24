@@ -834,6 +834,11 @@ export const activate = (context: vscode.ExtensionContext): void => {
     customBaseUrl: () => cfg().get<string>('baseUrl') ?? '',
     keyFor: keyForProvider,
     clientFor: clientForProvider,
+    // Codex over the Bridge (#39): no API key — the signed-in flag gates its /v1/models row, current()
+    // returns the refreshed OAuth bundle, and the shared Effort knob drives its Responses reasoning.
+    codexSignedIn: () => codexAuth.isSignedIn(),
+    codexCreds: () => codexAuth.current(),
+    effort: () => activeEffort(),
     port: bridgePort,
     accessSecret: () => bridgeSecret,
     log: (m) => output.appendLine(m),
